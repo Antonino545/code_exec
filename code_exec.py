@@ -673,8 +673,21 @@ def main(argv=None) -> int:
     elif args.action and not args.file and not Path(args.action).exists():
         return fail(f"Unknown command or file: '{args.action}'. Run 'code-exec' without arguments for the menu.")
 
+    if args.clipboard:
+        args.action = "apply"
     is_interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-    has_flags = any([args.help, args.prompt, args.file, args.dry_run, args.yes, args.no_run, args.no_commit])
+    has_flags = any([
+        args.help,
+        args.prompt,
+        args.commit_prompt,
+        args.diff,
+        args.clipboard,
+        args.file,
+        args.dry_run,
+        args.yes,
+        args.no_run,
+        args.no_commit,
+    ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
         if choice in {"q", "quit", "exit", ""}:

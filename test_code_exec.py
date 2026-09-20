@@ -560,5 +560,16 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertIn("Missing >>>", str(ctx.exception))
 
 
+    def test_main_commit_prompt_flag_bypasses_menu(self):
+        from unittest.mock import patch
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("code_exec.generate_commit_prompt", return_value="COMMIT test: mock"), \
+             patch("code_exec.set_clipboard"), \
+             patch("code_exec.ui.commit_prompt_copied"):
+            from code_exec import main
+            ret = main(["-c"])
+            self.assertEqual(ret, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
