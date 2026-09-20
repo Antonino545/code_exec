@@ -286,6 +286,72 @@ class TestResilienceAndSecurity(unittest.TestCase):
             self.assertFalse(success)
             self.assertIn("No changes detected in git repository to commit", msg)
 
+    def test_complex_five_stage_rollback(self):
+        fs = RealFS(timeout=10)
+        # Stage 1: Create directory
+        op1 = Operation("MKDIR", (f"{self.scratch_rel}/stage_dir",))
+        execute(op1, fs)
+        # Stage 2: Create base file
+        op2 = Operation("CREATE", (f"{self.scratch_rel}/stage_dir/base.txt",), "line 1\nline 2\n")
+        execute(op2, fs)
+        # Stage 3: Edit base file
+        op3 = Operation("EDIT", (f"{self.scratch_rel}/stage_dir/base.txt",), "line 2\n", "line 2 edited\n")
+        execute(op3, fs)
+        # Stage 4: Patch base file
+        patch_text = "@@ -1,2 +1,2 @@\n line 1\n-line 2 edited\n+line 2 patched\n"
+        op4 = Operation("PATCH", (f"{self.scratch_rel}/stage_dir/base.txt",), patch_text)
+        execute(op4, fs)
+        self.assertIn("line 2 patched", (self.scratch / "stage_dir/base.txt").read_text(encoding="utf-8"))
+
+        # Rollback all 4 operations
+        errs = fs.rollback()
+        self.assertEqual(errs, [])
+        self.assertFalse((self.scratch / "stage_dir/base.txt").exists())
+        self.assertFalse((self.scratch / "stage_dir").exists())
+        fs.cleanup()
+
+    def test_chmod_rollback(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX file permission testing not applicable on Windows")
+        script = self.scratch / "chmod_test.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(script, 0o644)
+        fs = RealFS(timeout=10)
+
+        op = Operation("CHMOD", (f"{self.scratch_rel}/chmod_test.sh", "+x"))
+        execute(op, fs)
+        current_mode = stat.S_IMODE(script.stat().st_mode)
+        self.assertTrue(bool(current_mode & 0o111))
+
+        # Rollback
+        errs = fs.rollback()
+        self.assertEqual(errs, [])
+        restored_mode = stat.S_IMODE(script.stat().st_mode)
+        self.assertEqual(restored_mode & 0o777, 0o644)
+        fs.cleanup()
+
+    def test_safe_path_extended_traversal_attempts(self):
+        traversals = [
+            f"{self.scratch_rel}/././../../outside.py",
+            "subdir/../../outside.txt",
+            ".git",
+            ".code_exec",
+            "nested/.code_exec",
+            ".ENV.staging",
+            "id_ed25519",
+            "cert.CRT",
+            ".github/workflows/test.yml",
+            ".GitLab-CI.yml",
+        ]
+        for bad_path in traversals:
+            with self.assertRaises(OpError) as ctx:
+                safe_path(bad_path)
+            self.assertTrue(
+                "ERR|INVALID_PATH" in str(ctx.exception)
+                or "ERR|PROTECTED_PATH" in str(ctx.exception)
+                or "ERR|FILE_PROTECTED" in str(ctx.exception)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

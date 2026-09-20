@@ -10,6 +10,7 @@ from code_exec import (
     extract_plan,
     find_unique,
     parse_operations,
+    preflight,
     safe_path,
 )
 
@@ -659,6 +660,135 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             from code_exec import main
             ret = main(["-c"])
             self.assertEqual(ret, 0)
+
+    def test_parser_tilde_fences(self):
+        plan_text = (
+            "Here is the plan:\n\n"
+            "~~~code_exec\n"
+            "CREATE tilde_test.txt\n"
+            "<<<\n"
+            "tilde fence content\n"
+            ">>>\n"
+            "~~~\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "tilde_test.txt")
+
+    def test_parser_indented_fences(self):
+        plan_text = (
+            "Indented block:\n\n"
+            "    ```code_exec\n"
+            "    CREATE indented.txt\n"
+            "    <<<\n"
+            "    content\n"
+            "    >>>\n"
+            "    ```\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "indented.txt")
+
+    def test_parser_quadruple_backticks_with_nested_blocks(self):
+        quad = "`" * 4
+        tri = "`" * 3
+        plan_text = (
+            f"{quad}code_exec\n"
+            "CREATE nested_doc.md\n"
+            "<<<\n"
+            f"{tri}python\n"
+            "print('inner')\n"
+            f"{tri}\n"
+            ">>>\n"
+            f"{quad}\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertIn("```python", ops[0].data)
+
+    def test_parser_interspersed_comments_and_blank_lines(self):
+        plan_text = (
+            "# Top level comment\n"
+            "\n"
+            "CREATE file_with_comments.txt\n"
+            "# Mid-level explanation\n"
+            "<<<\n"
+            "payload\n"
+            ">>>\n"
+            "\n"
+            "# Final comment\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+
+    def test_patch_crlf_target(self):
+        vfs = VirtualFS()
+        target = ROOT / "crlf_patch.txt"
+        vfs.write(target, "first line\r\nsecond line\r\nthird line\r\n")
+        patch_text = (
+            "@@ -1,3 +1,3 @@\n"
+            " first line\n"
+            "-second line\n"
+            "+second line patched\n"
+            " third line\n"
+        )
+        op = Operation("PATCH", ("crlf_patch.txt",), patch_text)
+        execute(op, vfs)
+        result = vfs.read(target)
+        self.assertIn("second line patched", result)
+        self.assertIn("\r\n", result)
+
+    def test_patch_prepend_at_top_of_file(self):
+        vfs = VirtualFS()
+        target = ROOT / "prepend_patch.txt"
+        vfs.write(target, "entry 1\nentry 2\n")
+        patch_text = (
+            "@@ -1,2 +1,3 @@\n"
+            "+entry 0\n"
+            " entry 1\n"
+            " entry 2\n"
+        )
+        op = Operation("PATCH", ("prepend_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertEqual(vfs.read(target), "entry 0\nentry 1\nentry 2\n")
+
+    def test_patch_delete_entire_content(self):
+        vfs = VirtualFS()
+        target = ROOT / "clear_patch.txt"
+        vfs.write(target, "to be removed 1\nto be removed 2\n")
+        patch_text = (
+            "@@ -1,2 +0,0 @@\n"
+            "-to be removed 1\n"
+            "-to be removed 2\n"
+        )
+        op = Operation("PATCH", ("clear_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertEqual(vfs.read(target).strip(), "")
+
+    def test_preflight_prevent_duplicate_delete(self):
+        ops = [
+            Operation("DELETE", ("dup_del.txt",)),
+            Operation("DELETE", ("dup_del.txt",)),
+        ]
+        # Deleting already-deleted file must fail preflight simulation
+        with self.assertRaises(OpError) as ctx:
+            preflight(ops)
+        self.assertIn("ERR|DELETE_NOT_FOUND", str(ctx.exception))
+
+    def test_preflight_prevent_patch_after_delete(self):
+        ops = [
+            Operation("DELETE", ("deleted.txt",)),
+            Operation("PATCH", ("deleted.txt",), "@@ -1,1 +1,1 @@\n-a\n+b\n"),
+        ]
+        with self.assertRaises(OpError) as ctx:
+            preflight(ops)
+        self.assertIn("ERR|CONFLICTING_OPERATIONS", str(ctx.exception))
 
 
 if __name__ == "__main__":

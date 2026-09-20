@@ -235,9 +235,8 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
             raise ValueError("Missing >>> for block opened with <<<")
         return "\n".join(lines[start:k]), k + 1
 
-    while j < len(lines) and not lines[j].strip():
+    while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
         j += 1
-
     if j < len(lines) and lines[j].strip().startswith("<<<"):
         start = j + 1
         k = start
@@ -264,7 +263,7 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
 
 
 def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tuple[int, bool]:
-    while i < len(lines) and not lines[i].strip():
+    while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("#")):
         i += 1
     if i >= len(lines):
         raise ValueError(f"{command} requires {keyword} (line {i + 1})")
