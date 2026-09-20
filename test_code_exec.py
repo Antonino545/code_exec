@@ -493,6 +493,81 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertIn("+first line", diff)
         self.assertIn("+second line", diff)
 
+    def test_patch_command_single_hunk(self):
+        vfs = VirtualFS()
+        target = ROOT / "patch_target.txt"
+        vfs.write(target, "line 1\nline 2\nline 3\n")
+        patch_text = (
+            "--- a/patch_target.txt\n"
+            "+++ b/patch_target.txt\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line 1\n"
+            "-line 2\n"
+            "+line 2 modified\n"
+            " line 3\n"
+        )
+        op = Operation("PATCH", ("patch_target.txt",), patch_text)
+        msg = execute(op, vfs)
+        self.assertIn("Patched patch_target.txt (1 hunk)", msg)
+        self.assertEqual(vfs.read(target), "line 1\nline 2 modified\nline 3\n")
+
+    def test_patch_command_multi_hunk_with_drift(self):
+        vfs = VirtualFS()
+        target = ROOT / "multi_patch.py"
+        initial = "\n".join([f"line {i}" for i in range(1, 21)]) + "\n"
+        vfs.write(target, initial)
+        patch_text = (
+            "@@ -3,3 +3,5 @@\n"
+            " line 3\n"
+            "-line 4\n"
+            "+line 4.1\n"
+            "+line 4.2\n"
+            "+line 4.3\n"
+            " line 5\n"
+            "@@ -15,3 +15,3 @@\n"
+            " line 15\n"
+            "-line 16\n"
+            "+line 16 modified\n"
+            " line 17\n"
+        )
+        op = Operation("PATCH", ("multi_patch.py",), patch_text)
+        msg = execute(op, vfs)
+        self.assertIn("Patched multi_patch.py (2 hunks)", msg)
+        result = vfs.read(target)
+        self.assertIn("line 4.1\nline 4.2\nline 4.3", result)
+        self.assertIn("line 16 modified", result)
+
+    def test_patch_command_line_offset_drift_tolerance(self):
+        vfs = VirtualFS()
+        target = ROOT / "drift_patch.txt"
+        vfs.write(target, "header\nline a\nline b\nline c\nfooter\n")
+        patch_text = (
+            "@@ -80,3 +80,3 @@\n"
+            " line a\n"
+            "-line b\n"
+            "+line b drifted\n"
+            " line c\n"
+        )
+        op = Operation("PATCH", ("drift_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertIn("line b drifted", vfs.read(target))
+
+    def test_patch_command_failure_reporting(self):
+        vfs = VirtualFS()
+        target = ROOT / "fail_patch.txt"
+        vfs.write(target, "alpha\nbeta\ngamma\n")
+        patch_text = (
+            "@@ -1,3 +1,3 @@\n"
+            " nonexistent 1\n"
+            "-nonexistent 2\n"
+            "+replacement\n"
+            " nonexistent 3\n"
+        )
+        op = Operation("PATCH", ("fail_patch.txt",), patch_text)
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|PATCH_FAILED|fail_patch.txt", str(ctx.exception))
+
     def test_undo_functionality(self):
         from code_exec import undo_last_run, apply_plan
         target = ROOT / "test_undo_target.txt"
@@ -510,10 +585,25 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
                 target.unlink()
 
     def test_hallucinated_unknown_commands(self):
-        for cmd in ["UPDATE file.txt", "MODIFY file.txt", "PATCH file.txt", "APPEND_LINE file.txt", "WRITE file.txt"]:
-            with self.assertRaises(ValueError) as ctx:
+        tests = [
+            ("UPDATE file.txt", "EDIT"),
+            ("MODIFY file.txt", "EDIT"),
+            ("WRITE file.txt", "CREATE"),
+            ("APPEND_LINE file.txt", "APPEND"),
+            ("COMMITT msg", "COMMIT"),
+        ]
+        for cmd, expected_hint in tests:
+            with self.assertRaises(OpError) as ctx:
                 parse_operations(f"{cmd}\n<<<\ncontent\n>>>\n")
-            self.assertIn("Unknown instruction", str(ctx.exception))
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+            self.assertIn(f"Did you mean '{expected_hint}'?", str(ctx.exception))
+
+    def test_hallucinated_bare_runner_command_hint(self):
+        for runner in ["npm test", "pytest", "python script.py", "git status"]:
+            with self.assertRaises(OpError) as ctx:
+                parse_operations(runner)
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+            self.assertIn("Shell commands must be prefixed with RUN", str(ctx.exception))
 
     def test_hallucinated_edit_keywords(self):
         with self.assertRaises(ValueError) as ctx:
@@ -532,9 +622,9 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
 
     def test_hallucinated_shell_commands_without_run(self):
         for cmd in ["npm test", "git commit -m 'update'", "pytest", "pip install -r requirements.txt"]:
-            with self.assertRaises(ValueError) as ctx:
+            with self.assertRaises(OpError) as ctx:
                 parse_operations(cmd)
-            self.assertIn("Unknown instruction", str(ctx.exception))
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
 
     def test_hallucinated_conversational_text_inside_plan(self):
         plan = (
@@ -544,9 +634,9 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             "hello\n"
             ">>>\n"
         )
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(OpError) as ctx:
             parse_operations(plan)
-        self.assertIn("Unknown instruction", str(ctx.exception))
+        self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
 
     def test_hallucinated_unclosed_block(self):
         plan = (
