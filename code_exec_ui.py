@@ -235,27 +235,41 @@ class TerminalUI:
         _row()
         print(f"{c.paint(bot, c.SLATE)}\n")
 
+    def banner(self) -> None:
+        c = self.palette
+        # Claude Code inspired clean block font
+        art = [
+            r"  ____ ___  ____  _____   _______  _______ ____ ",
+            r" / ___/ _ \|  _ \| ____| | ____\ \/ / ____/ ___|",
+            r"| |  | | | | | | |  _|   |  _|  \  /|  _| | |   ",
+            r"| |__| |_| | |_| | |___  | |___ /  \| |___| |___",
+            r" \____\___/|____/|_____| |_____/_/\_\_____|\____|",
+        ]
+        print()
+        for line in art:
+            print(c.paint(line, c.CORAL, bold=True))
+        print(f"  {c.paint('Local Deterministic Coding Agent', c.SLATE)}  {c.paint('v1.2', c.CYAN)}")
+        print()
+
     def header(self, root: Path) -> None:
         c = self.palette
         w = self._width()
         inner_w = w - 4
 
-        title = c.paint(" code-exec ", c.CORAL, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
+        self.banner()
 
         raw_path = f"📁 {root}"
-        if _vlen(raw_path) > inner_w:
-            raw_path = f"📁 ...{raw_path[-(inner_w - 6):]}"
-        path_line = f"│ {c.paint(raw_path, c.SLATE)}{' ' * max(0, inner_w - _vlen(raw_path))} │"
+        if _vlen(raw_path) > inner_w - 4:
+            raw_path = f"📁 ...{raw_path[-(inner_w - 10):]}"
 
+        top = f"╭{'─' * (w - 2)}╮"
         bot = f"╰{'─' * (w - 2)}╯"
+        path_line = f"│  {c.paint(raw_path, c.WHITE)}{' ' * max(0, inner_w - _vlen(raw_path) - 1)}│"
 
-        print(f"\n{c.paint(top, c.SLATE)}")
+        print(c.paint(top, c.SLATE))
         print(path_line)
-        print(f"{c.paint(bot, c.SLATE)}\n")
-
-    def banner(self) -> None:
-        pass
+        print(c.paint(bot, c.SLATE))
+        print()
 
     def project_root(self, root: Path) -> None:
         self.header(root)
