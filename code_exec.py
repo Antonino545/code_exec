@@ -147,23 +147,30 @@ def execute(op: Operation, fs) -> str | None:
                 if doc_indent and not _get_leading_indent(first_c):
                     content = newline.join((doc_indent + ln if ln.strip() else ln) for ln in content_lines)
 
+            content_clean = content[:-len(newline)] if content.endswith(newline) else content
             if command == "INSERT_BEFORE":
-                new = doc[: match.start] + content + newline + doc[match.start :]
+                new = doc[: match.start] + content_clean + newline + doc[match.start :]
                 done = "Inserted before marker in"
             else:
-                new = doc[: match.end] + newline + content + doc[match.end :]
+                new = doc[: match.end] + newline + content_clean + doc[match.end :]
                 done = "Inserted after marker in"
             note = match.note
 
         elif command == "APPEND":
             base = doc if (not doc or doc.endswith("\n")) else doc + newline
-            new = base + with_newlines(op.data, newline) + newline
+            content = with_newlines(op.data, newline)
+            if not content.endswith(newline):
+                content += newline
+            new = base + content
             note = ""
             done = "Appended to"
 
         else:
             bom = "\ufeff" if doc.startswith("\ufeff") else ""
-            new = bom + with_newlines(op.data, newline) + newline + doc[len(bom) :]
+            content = with_newlines(op.data, newline)
+            if not content.endswith(newline):
+                content += newline
+            new = bom + content + doc[len(bom) :]
             note = ""
             done = "Prepended to"
 

@@ -119,7 +119,8 @@ def newline_style(text: str) -> str:
 
 
 def with_newlines(text: str, newline: str) -> str:
-    return text if newline == "\n" else text.replace("\n", newline)
+    clean = text.replace("\r\n", "\n")
+    return clean if newline == "\n" else clean.replace("\n", newline)
 
 
 def _remove(path: Path) -> None:
