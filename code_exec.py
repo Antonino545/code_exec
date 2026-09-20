@@ -690,13 +690,31 @@ COMMANDS = {
 }
 
 
-def read_block(lines: list[str], i: int) -> tuple[str, int]:
+def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[str, int]:
     """Read a `<<< ... >>>` block or raw lines up to END_OF_FILE."""
     j = i
+    if inline_started:
+        start = j
+        k = start
+        depth = 1
+        while k < len(lines):
+            line_str = lines[k].strip()
+            if line_str == "<<<":
+                depth += 1
+            elif line_str == ">>>":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if k >= len(lines):
+            raise ValueError(f"Missing >>> for block opened with <<<")
+        return "\n".join(lines[start:k]), k + 1
+
     while j < len(lines) and not lines[j].strip():
         j += 1
 
-    if j < len(lines) and lines[j].strip() == "<<<":
+    if j < len(lines) and lines[j].strip().startswith("<<<"):
+        rem = lines[j].strip()[3:].strip()
         start = j + 1
         k = start
         depth = 1
@@ -721,12 +739,17 @@ def read_block(lines: list[str], i: int) -> tuple[str, int]:
     return "\n".join(lines[i:k]), k + 1
 
 
-def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> int:
+def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tuple[int, bool]:
     while i < len(lines) and not lines[i].strip():
         i += 1
-    if i >= len(lines) or lines[i].strip() != keyword:
+    if i >= len(lines):
         raise ValueError(f"{command} requires {keyword} (line {i + 1})")
-    return i + 1
+    line = lines[i].strip()
+    if line == keyword:
+        return i + 1, False
+    if line.startswith(keyword) and line[len(keyword):].strip() == "<<<":
+        return i + 1, True
+    raise ValueError(f"{command} requires {keyword} (line {i + 1})")
 
 
 def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
@@ -757,22 +780,29 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     if command in {"DELETE", "MKDIR"}:
         return Operation(command, (path,)), i
 
+    inline_block = False
+    if rest.endswith("<<<"):
+        rest = rest[:-3].strip()
+        inline_block = True
+
+    path = clean_path(rest)
+
     if command in {"CREATE", "APPEND", "PREPEND"}:
-        content, i = read_block(lines, i)
+        content, i = read_block(lines, i, inline_started=inline_block)
         return Operation(command, (path,), content), i
 
     if command == "EDIT":
-        i = expect_keyword(lines, i, "SEARCH", command)
-        search, i = read_block(lines, i)
-        i = expect_keyword(lines, i, "REPLACE", command)
-        replace, i = read_block(lines, i)
+        i, search_inline = expect_keyword(lines, i, "SEARCH", command)
+        search, i = read_block(lines, i, inline_started=search_inline)
+        i, replace_inline = expect_keyword(lines, i, "REPLACE", command)
+        replace, i = read_block(lines, i, inline_started=replace_inline)
         return Operation("EDIT", (path,), search, replace), i
 
     # INSERT_BEFORE / INSERT_AFTER
-    i = expect_keyword(lines, i, "MARKER", command)
-    marker, i = read_block(lines, i)
-    i = expect_keyword(lines, i, "CONTENT", command)
-    content, i = read_block(lines, i)
+    i, marker_inline = expect_keyword(lines, i, "MARKER", command)
+    marker, i = read_block(lines, i, inline_started=marker_inline)
+    i, content_inline = expect_keyword(lines, i, "CONTENT", command)
+    content, i = read_block(lines, i, inline_started=content_inline)
     return Operation(command, (path,), marker, content), i
 
 

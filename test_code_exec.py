@@ -103,6 +103,22 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertEqual(ops[0].args[0], "alt.txt")
         self.assertEqual(ops[0].data, "alternative content")
 
+    def test_inline_block_delimiters(self):
+        plan = (
+            "THINK\n"
+            "Test inline <<<\n"
+            "END_THINK\n"
+            "CREATE inline.txt <<<\n"
+            "inline content\n"
+            ">>>\n"
+        )
+        extracted = extract_plan(plan)
+        ops = parse_operations(extracted)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "inline.txt")
+        self.assertEqual(ops[0].data, "inline content")
+
     def test_legacy_plan_only_response(self):
         raw_plan = (
             "THINK\n"
