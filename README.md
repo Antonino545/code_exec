@@ -1,4 +1,4 @@
-# code-exec 🐾
+#CODE-EXEC
 
 A deterministic, atomic local code executor and guardrailed runtime designed for AI coding workflows.
 
