@@ -1,19 +1,29 @@
 # code-exec 🐾
 
-A deterministic, atomic local code executor designed for AI coding workflows.
+A deterministic, atomic local code executor and guardrailed runtime designed for AI coding workflows.
 
-`code-exec` provides a practical solution to avoid manually copying and pasting multiple code snippets, file changes, and diffs from web chatboxes, without requiring expensive autonomous coding agent subscriptions or API tokens. You chat with whatever model or web interface you prefer, copy the generated plan block with a single click, and let `code-exec` validate, apply, and commit the changes atomically.
+`code-exec` provides an agentic execution workflow without paying for expensive autonomous coding subscriptions or API tokens. You can chat with any AI model or web interface (Claude, ChatGPT, Gemini, local LLMs), copy the AI's response to your clipboard, and let `code-exec` automatically isolate the plan, validate consistency, sandbox shell executions, apply changes, and commit files atomically.
+
+```text
+  ____ ___  ____  _____   _______  _______ ____ 
+ / ___/ _ \|  _ \| ____| | ____\ \/ / ____/ ___|
+| |  | | | | | | |  _|   |  _|  \  /|  _| | |   
+| |__| |_| | |_| | |___  | |___ /  \| |___| |___
+ \____\___/|____/|_____| |_____/_/\_\_____|\____|
+  Local Deterministic Coding Agent  v1.2
+```
 
 ---
 
-## Features
+## Key Highlights
 
-- **Clipboard-First Workflow**: Copy an AI execution plan (`Ctrl+C` / `⌘C`) and apply it instantly in your project directory.
-- **Cost-Effective & Autonomous-Free**: Get agentic execution locally without paying for expensive AI agent subscriptions or API credit burn.
-- **Interactive Launcher Menu**: Simply run `code-exec` to choose between applying, dry-running, copying the AI prompt, or viewing the guide.
-- **Atomic Operations & Rollback**: File operations are preflighted and backed up. If a validation step fails, all file modifications are safely rolled back.
-- **Tolerant Search & Replace**: Matches local anchors even with harmless indentation, quote variations, or emoji/unicode drift.
-- **Scoped Git Commits**: Uses the `COMMIT` instruction to prompt and stage *only* the files touched by the plan, keeping your working tree clean.
+- **Full AI Response Extraction**: Copy the *entire* conversational response. `code-exec` extracts the executable ````code_exec```` block and automatically ignores conversational prose, markdown headers, and unrelated code snippets.
+- **Sandboxed Execution & Whitelist**: Whitelists safe verification runners (`pytest`, `unittest`, `npm test`, `cargo test`, `ruff`). Demands interactive user approval and runs unvetted scripts inside an OS network-isolated sandbox (`sandbox-exec` on macOS, `unshare` on Linux).
+- **Sensitive Credential Protection**: Blocks accidental modification or deletion of secrets, environment files, and CI workflows (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.github/workflows/*`).
+- **Atomic Consistency Checks**: Catches conflicting or duplicate file modifications in a plan before touching disk (e.g., duplicate `CREATE` commands or `EDIT` after `DELETE`).
+- **Interactive TUI & Diagnostic Cards**: Claude Code-inspired ASCII banner, responsive boxed menus, colorized diff visualizer, and machine-readable error cards (`ERR|...`).
+- **Tolerant Search & Replace**: Multi-tier matching handles indentation variations, collapsed whitespace, CRLF vs LF, and JSX tag formatting while preserving original code formatting.
+- **Scoped Git Commits**: Automatically stages and commits *only* the specific files modified by the plan, leaving other untracked or modified files in your repo untouched.
 
 ---
 
@@ -22,19 +32,20 @@ A deterministic, atomic local code executor designed for AI coding workflows.
 ### macOS
 
 #### Option 1: Global Launcher Script (Recommended)
+Create a launcher in `/usr/local/bin` (replace `/path/to/code_exec` with the absolute path to your repo):
 ```zsh
 sudo tee /usr/local/bin/code-exec << 'EOF'
 #!/usr/bin/env zsh
-exec python3 "/Users/antonino54/Documents/Project/Personal Project/code_exec/code_exec.py" "$@"
+exec python3 "/path/to/code_exec/code_exec.py" "$@"
 EOF
 
 sudo chmod +x /usr/local/bin/code-exec
 ```
 
-#### Option 2: Zsh Alias
-Add to your `~/.zshrc`:
+#### Option 2: Shell Alias
+Add to your `~/.zshrc` or `~/.bashrc`:
 ```zsh
-alias code-exec='python3 "/Users/antonino54/Documents/Project/Personal Project/code_exec/code_exec.py"'
+alias code-exec='python3 "/path/to/code_exec/code_exec.py"'
 ```
 Then reload: `source ~/.zshrc`.
 
@@ -137,18 +148,45 @@ code-exec -p
 
 ## Supported Plan Commands
 
-Every plan starts with a `THINK` block explaining the rationale and ends with file operations and an optional `COMMIT` command:
+Plans start with a `THINK` block explaining the change and contain one or more operations followed by an optional `COMMIT`:
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
 | `CREATE` | `CREATE path <<< content >>>` | Creates a new file. Fails if the file already exists. |
 | `EDIT` | `EDIT path SEARCH <<<...>>> REPLACE <<<...>>>` | Surgically replaces a unique code anchor. |
 | `DELETE` | `DELETE path` | Removes a file or directory safely. |
-| `MOVE` | `MOVE src -> dst` | Moves/renames a file or directory. |
+| `MOVE` | `MOVE src -> dst` | Moves a file or directory. |
 | `COPY` | `COPY src -> dst` | Copies a file or folder. |
-| `MKDIR` | `MKDIR path` | Creates a directory recursively. |
-| `RUN` | `RUN shell command` | Runs a shell command inside the project root. |
-| `COMMIT` | `COMMIT message` | Prompts to git commit only the modified files. |
+| `RENAME` | `RENAME src -> dst` | Renames a file or folder. |
+| `MKDIR` | `MKDIR path` | Creates a directory path recursively. |
+| `APPEND` | `APPEND path <<< content >>>` | Appends content to the end of a file. |
+| `PREPEND` | `PREPEND path <<< content >>>` | Prepends content to the start of a file. |
+| `INSERT_BEFORE` | `INSERT_BEFORE path MARKER <<<...>>> CONTENT <<<...>>>` | Inserts content immediately before an anchor. |
+| `INSERT_AFTER` | `INSERT_AFTER path MARKER <<<...>>> CONTENT <<<...>>>` | Inserts content immediately after an anchor. |
+| `RUN` | `RUN shell command` | Runs a whitelisted or user-approved sandboxed command. |
+| `COMMIT` | `COMMIT message` | Scoped commit staging only modified files. |
+
+> **Note on Block Delimiters**: `<<<` can be placed either on its own line or inline immediately after the instruction/keyword (e.g. `CREATE path <<<`).
+
+---
+
+## Security & Guardrails
+
+`code-exec` incorporates multi-layered execution safeguards:
+
+1. **Command Whitelisting**:
+   - Verification tools (`python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`, `black`, `git status`, etc.) execute cleanly.
+   - Generic or unvetted scripts (`python script.py`, `node app.js`, `bash`) require explicit interactive confirmation (`[y/N]`).
+   - Destructive patterns (`rm -rf`, `sudo`, `curl | sh`, inline execution flags like `-c` or `-i`) are strictly blocked.
+
+2. **Network Sandboxing**:
+   - Unvetted script runs are wrapped inside OS sandboxes to drop outbound network access (`sandbox-exec -p '(version 1) (allow default) (deny network-outbound)'` on macOS, and `unshare -r -n` on Linux).
+
+3. **Protected Paths**:
+   - Plans are forbidden from touching `.git`, the project root, environment files (`.env*`), private keys (`*.key`, `*.pem`, `id_rsa`), and CI workflows (`.github/workflows/*`).
+
+4. **Multi-File Consistency Verification**:
+   - `preflight()` statically inspects plans for conflicting sequences (e.g. duplicate creations or editing after deletion) before any changes touch your disk.
 
 ---
 
