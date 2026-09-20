@@ -495,15 +495,88 @@ class TerminalUI:
         w = self._width()
         inner_w = w - 4
 
-        title = c.paint(" Error ", c.RED, bold=True)
+        title = c.paint(" Execution / Validation Error ", c.RED, bold=True)
         top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
         bot = f"╰{'─' * (w - 2)}╯"
 
         print(c.paint(top, c.RED), file=sys.stderr)
-        for line in message.split("\n"):
-            line_str = f"  ✖ {line}"
-            pad = max(0, inner_w - _vlen(line_str))
-            print(f"│ {c.paint(line_str, c.RED)}{' ' * pad} │", file=sys.stderr)
+
+        lines = message.split("\n")
+        in_diff = False
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Empty spacer line
+            if not stripped:
+                print(f"│{' ' * (inner_w + 2)}│", file=sys.stderr)
+                continue
+
+            # Diff boundaries
+            if set(stripped) == {"-"}:
+                in_diff = True
+                divider = f"  {'─' * (inner_w - 4)}"
+                pad = max(0, inner_w - _vlen(divider))
+                print(f"│ {c.paint(divider, c.SLATE)}{' ' * pad} │", file=sys.stderr)
+                continue
+
+            # Diff lines colorization
+            if in_diff:
+                if stripped.startswith("---") or stripped.startswith("+++"):
+                    colored = f"  {c.paint(stripped, c.CYAN)}"
+                elif stripped.startswith("@@"):
+                    colored = f"  {c.paint(stripped, c.AMBER)}"
+                elif stripped.startswith("-"):
+                    colored = f"  {c.paint(stripped, c.RED)}"
+                elif stripped.startswith("+"):
+                    colored = f"  {c.paint(stripped, c.GREEN)}"
+                else:
+                    colored = f"  {c.paint(stripped, c.SLATE)}"
+                pad = max(0, inner_w - _vlen(colored))
+                print(f"│ {colored}{' ' * pad} │", file=sys.stderr)
+                continue
+
+            # Machine-readable error code tags (ERR|...)
+            if "ERR|" in stripped:
+                parts = stripped.split("ERR|", 1)
+                prefix = parts[0]
+                err_token = f"ERR|{parts[1]}"
+                colored_err = c.paint(err_token, c.AMBER, bold=True)
+                formatted = f"  ✖ {prefix}{colored_err}"
+                pad = max(0, inner_w - _vlen(formatted))
+                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
+            elif stripped.startswith("Closest candidate"):
+                badge = c.paint(" SIMILARITY MATCH ", c.CYAN, bold=True)
+                formatted = f"  ▲ {badge} {c.paint(stripped, c.WHITE)}"
+                pad = max(0, inner_w - _vlen(formatted))
+                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
+            else:
+                formatted = f"  ✖ {c.paint(line, c.RED)}"
+                pad = max(0, inner_w - _vlen(formatted))
+                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
+
+        # Contextual recommendation banner
+        hint = ""
+        if "ERR|SEARCH_NOT_FOUND" in message:
+            hint = "Tip: SEARCH block didn't match. Compare against the diff above and add unique lines."
+        elif "ERR|SEARCH_AMBIGUOUS" in message:
+            hint = "Tip: SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."
+        elif "ERR|CONFLICTING_OPERATIONS" in message:
+            hint = "Tip: The plan performs contradictory operations on the same file. Separate or order your edits."
+        elif "ERR|FORBIDDEN_COMMAND" in message:
+            hint = "Tip: RUN command not permitted. Use whitelisted test runners or run manually."
+        elif "ERR|FILE_PROTECTED" in message:
+            hint = "Tip: Target is a sensitive file/key. Modify configuration files manually."
+        elif "ERR|MULTIPLE_PLANS" in message:
+            hint = "Tip: Multiple plan blocks found. Provide a single plan block per response."
+
+        if hint:
+            print(f"│{' ' * (inner_w + 2)}│", file=sys.stderr)
+            hint_str = f"  💡 {c.paint(hint, c.AMBER)}"
+            pad = max(0, inner_w - _vlen(hint_str))
+            print(f"│ {hint_str}{' ' * pad} │", file=sys.stderr)
+
+        print(f"│{' ' * (inner_w + 2)}│", file=sys.stderr)
         print(f"{c.paint(bot, c.RED)}\n", file=sys.stderr)
 
     def command_failed(self, error: str, backup_dir: Path | None) -> None:

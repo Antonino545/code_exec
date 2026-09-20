@@ -67,8 +67,8 @@ DEFAULT_RUN_TIMEOUT = 600  # seconds per RUN command; 0 disables the limit
 
 # Allowed executables and tools for RUN commands
 ALLOWED_RUN_COMMAND_PREFIXES = (
-    "python ",
-    "python3 ",
+    "python3 -m unittest",
+    "python3 -m pytest",
     "pytest",
     "unittest",
     "npm test",
@@ -89,6 +89,15 @@ ALLOWED_RUN_COMMAND_PREFIXES = (
     "mypy",
     "git status",
     "git diff",
+)
+
+# Commands that are permitted ONLY with explicit interactive terminal approval
+INTERACTIVE_ONLY_PREFIXES = (
+    "python ",
+    "python3 ",
+    "node ",
+    "bash ",
+    "sh ",
 )
 
 # High-risk patterns forbidden in RUN commands even if prefix matches
@@ -1096,19 +1105,35 @@ class RealFS:
             raise OpError(f"Cannot copy {rel(src)}: {exc}") from None
 
     def run(self, command: str):
-        validate_run_command(command)
+        needs_prompt = validate_run_command(command)
         ui.command(command)
-        self.ran_commands.append(command)
+
+        if needs_prompt:
+            c = ui.palette
+            print(c.paint(f"\n  ⚠️  SECURITY WARNING: Unvetted / Generic Execution Requested", c.AMBER))
+            ans = input(c.paint(f"  ❯ Allow '{command}' to execute? [y/N]: ", c.CORAL, bold=True)).strip().lower()
+            if ans not in {"y", "yes"}:
+                raise CommandFailed(f"User denied execution of: {command}")
+
+        actual_cmd = command
+        # Basic sandboxing (network drop) for unvetted generic commands
+        if needs_prompt:
+            if sys.platform.startswith("linux"):
+                actual_cmd = f"unshare -r -n {command}"
+            elif sys.platform == "darwin":
+                actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' {command}"
+
+        self.ran_commands.append(actual_cmd)
         limit = self.timeout or None
         try:
-            result = subprocess.run(command, shell=True, cwd=ROOT, timeout=limit)
+            result = subprocess.run(actual_cmd, shell=True, cwd=ROOT, timeout=limit)
         except subprocess.TimeoutExpired:
             raise CommandFailed(
-                f"Command timed out after {self.timeout}s: {command}"
+                f"Command timed out after {self.timeout}s: {actual_cmd}"
             ) from None
         if result.returncode != 0:
             raise CommandFailed(
-                f"Command failed (exit {result.returncode}): {command}"
+                f"Command failed (exit {result.returncode}): {actual_cmd}"
             )
 
 
@@ -1142,7 +1167,8 @@ class RealFS:
             self.backup_dir = None
 
 
-def validate_run_command(cmd: str) -> None:
+def validate_run_command(cmd: str) -> bool:
+    """Returns True if the command requires mandatory interactive confirmation, False otherwise."""
     trimmed = cmd.strip()
     if not trimmed:
         raise OpError("ERR|FORBIDDEN_COMMAND|empty command")
@@ -1154,11 +1180,18 @@ def validate_run_command(cmd: str) -> None:
         if forbidden in cmd_lower:
             raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - contains forbidden pattern '{forbidden}'")
 
-    # Verify command starts with an allowed prefix
-    matches_allowed = any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES)
-    if not matches_allowed:
-        allowed_list = ", ".join(f"'{p.strip()}'" for p in ALLOWED_RUN_COMMAND_PREFIXES[:7]) + ", ..."
-        raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - command not in whitelist (allowed: {allowed_list})")
+    # Block inline Python/Bash scripts and interactive REPLs
+    if re.search(r"\b(python[0-9.]*|node|bash|sh|perl|ruby)\s+(-[a-zA-Z]*c|--command|-i|-e)\b", cmd_lower):
+        raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - inline execution or interactive shell flags are forbidden")
+
+    if any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES):
+        return False
+        
+    if any(cmd_lower.startswith(prefix) for prefix in INTERACTIVE_ONLY_PREFIXES):
+        return True
+
+    allowed_list = ", ".join(f"'{p.strip()}'" for p in ALLOWED_RUN_COMMAND_PREFIXES[:5]) + ", ..."
+    raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - command not in whitelist (allowed: {allowed_list})")
 
     def cleanup(self):
         if self.backup_dir is not None:
@@ -1296,11 +1329,25 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
     reason = None
     trigger = 0
 
+    # Phase 1: Static Consistency & Conflict Verification
+    file_history: dict[str, list[str]] = {}
+    for number, op in enumerate(operations, 1):
+        if op.command == "RUN":
+            validate_run_command(op.args[0])
+        elif op.command not in {"RUN", "COMMIT"}:
+            for path_arg in op.args:
+                path_str = str(safe_path(path_arg, follow_leaf=False))
+                history = file_history.setdefault(path_str, [])
+                if op.command == "CREATE" and "CREATE" in history:
+                    raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
+                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                    if "DELETE" in history:
+                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to EDIT a file that was DELETED in the same plan")
+                history.append(op.command)
+
+    # Phase 2: Virtual Simulation
     for number, op in enumerate(operations, 1):
         try:
-            if op.command == "RUN":
-                validate_run_command(op.args[0])
-
             if reason is not None:
                 check_paths(op)
             elif op.command == "RUN":
