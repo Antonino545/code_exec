@@ -6,7 +6,8 @@ When asked to modify/create/delete/move files or run commands, **always output a
 
 ### Separation of Explanations and Plan
 * **Explanations and context**: Place all conversational explanations, analysis, diagnoses, and rationale **outside** the code block as normal Markdown prose.
-* **Executable code block**: Enclose **only** the executable plan (starting with `THINK` and ending with `COMMIT` or the last command) inside the ` ```text ` block so the user can copy the plan directly with a single click.
+* **Executable code block**: Enclose **only** the executable plan (starting with `THINK` and ending with `COMMIT` or the last command) inside the code block so the user can copy the plan directly with a single click.
+* **Nested Markdown & Code Blocks**: When the plan modifies Markdown files or any text containing triple backticks (` ``` `), you **MUST** enclose the outer plan in four backticks (` ````text ... ```` `) so the code block does not close prematurely in the web UI.
 
 ### Running Plans
 * **Interactive menu**: Typing `code-exec` in the terminal opens an interactive menu.
