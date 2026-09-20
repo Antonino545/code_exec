@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from code_exec_sandbox import build_sandboxed_command, validate_run_command
@@ -21,6 +23,9 @@ from code_exec_types import (
 )
 from code_exec_ui import ui
 
+
+BACKUP_ROOT = ROOT / ".code_exec" / "backups"
+MAX_BACKUP_HISTORY = 5
 
 def _default_file_mode() -> int:
     umask = os.umask(0)
@@ -114,7 +119,8 @@ def newline_style(text: str) -> str:
 
 
 def with_newlines(text: str, newline: str) -> str:
-    return text if newline == "\n" else text.replace("\n", newline)
+    clean = text.replace("\r\n", "\n")
+    return clean if newline == "\n" else clean.replace("\n", newline)
 
 
 def _remove(path: Path) -> None:
@@ -181,6 +187,14 @@ class VirtualFS:
     def mkdir(self, path):
         self._mkparents(path)
 
+    def touch(self, path):
+        if not self.lexists(path):
+            self.write(path, "")
+
+    def chmod(self, path, mode):
+        if not self.lexists(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{rel(path)}")
+
     def delete(self, path):
         self._drop_children(path)
         self.state[path] = ("gone",)
@@ -225,7 +239,9 @@ class RealFS:
 
     def _slot(self) -> Path:
         if self.backup_dir is None:
-            self.backup_dir = Path(tempfile.mkdtemp(prefix="code_exec_backup_"))
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self.backup_dir = BACKUP_ROOT / ts
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
         self._counter += 1
         return self.backup_dir / str(self._counter)
 
@@ -268,6 +284,31 @@ class RealFS:
 
     def mkdir(self, path):
         self._mkparents(path)
+
+    def touch(self, path: Path):
+        self._mkparents(path.parent)
+        if not os.path.lexists(path):
+            self.journal.append(("remove", path))
+        path.touch()
+
+    def chmod(self, path: Path, mode_str: str):
+        if not os.path.lexists(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{rel(path)}")
+        old_mode = stat.S_IMODE(path.stat().st_mode)
+        self.journal.append(("chmod", path, old_mode))
+        if mode_str in {"+x", "a+x", "u+x"}:
+            new_mode = old_mode | 0o111
+        elif mode_str in {"-x", "a-x"}:
+            new_mode = old_mode & ~0o111
+        else:
+            try:
+                new_mode = int(mode_str, 8)
+            except ValueError:
+                raise OpError(f"ERR|INVALID_MODE|Invalid chmod mode: {mode_str}")
+        try:
+            os.chmod(path, new_mode)
+        except OSError as exc:
+            raise OpError(f"Cannot chmod {rel(path)}: {exc}") from None
 
     def delete(self, path):
         slot = self._slot()
@@ -345,12 +386,117 @@ class RealFS:
                 elif kind == "move_back":
                     entry[2].parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(path), str(entry[2]))
+                elif kind == "chmod":
+                    try:
+                        os.chmod(path, entry[2])
+                    except OSError:
+                        pass
             except Exception as exc:
                 errors.append(f"{kind} {rel(path)}: {exc}")
         self.journal.clear()
         return errors
 
+    def save_backup_manifest(self) -> None:
+        """Persists rollback manifest to disk to allow subsequent `undo` commands."""
+        if self.backup_dir is None or not self.journal:
+            return
+        manifest_entries = []
+        for entry in self.journal:
+            item = {"kind": entry[0], "path": rel(entry[1])}
+            if len(entry) > 2:
+                if isinstance(entry[2], Path):
+                    try:
+                        item["slot"] = str(entry[2].relative_to(self.backup_dir))
+                    except ValueError:
+                        item["slot"] = rel(entry[2])
+                else:
+                    item["slot"] = str(entry[2])
+            manifest_entries.append(item)
+
+        manifest_data = {
+            "timestamp": datetime.now().isoformat(),
+            "journal": manifest_entries,
+            "ran_commands": self.ran_commands,
+        }
+        manifest_file = self.backup_dir / "manifest.json"
+        manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+
+        # Prune older backups beyond MAX_BACKUP_HISTORY
+        try:
+            backups = sorted([d for d in BACKUP_ROOT.iterdir() if d.is_dir()], key=lambda d: d.name)
+            while len(backups) > MAX_BACKUP_HISTORY:
+                oldest = backups.pop(0)
+                shutil.rmtree(oldest, ignore_errors=True)
+        except OSError:
+            pass
+
     def cleanup(self):
         if self.backup_dir is not None:
             shutil.rmtree(self.backup_dir, ignore_errors=True)
             self.backup_dir = None
+
+
+def undo_last_run() -> tuple[bool, str]:
+    """Reverts file changes made by the most recent successful plan."""
+    if not BACKUP_ROOT.exists():
+        return False, "No backups found (.code_exec/backups does not exist)."
+    backups = sorted(
+        [d for d in BACKUP_ROOT.iterdir() if d.is_dir() and (d / "manifest.json").exists()],
+        key=lambda d: d.name,
+    )
+    if not backups:
+        return False, "No previous backup found to undo."
+
+    target_backup = backups[-1]
+    manifest_file = target_backup / "manifest.json"
+    try:
+        data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"Failed to read backup manifest: {exc}"
+
+    journal = data.get("journal", [])
+    errors = []
+    restored_count = 0
+    for item in reversed(journal):
+        kind = item.get("kind")
+        rel_path = item.get("path")
+        slot = item.get("slot")
+        if not rel_path:
+            continue
+        path = ROOT / rel_path
+        try:
+            if kind == "rmdir":
+                if path.exists() and path.is_dir():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+            elif kind == "remove":
+                _remove(path)
+                restored_count += 1
+            elif kind == "restore" and slot:
+                slot_path = target_backup / slot
+                if slot_path.exists():
+                    _remove(path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(slot_path, path)
+                    restored_count += 1
+            elif kind == "move_back" and slot:
+                src_path = ROOT / slot
+                if path.exists():
+                    src_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(src_path))
+                    restored_count += 1
+            elif kind == "chmod" and slot:
+                try:
+                    os.chmod(path, int(slot))
+                    restored_count += 1
+                except (ValueError, OSError):
+                    pass
+        except Exception as exc:
+            errors.append(f"Failed to undo {kind} on {rel_path}: {exc}")
+
+    shutil.rmtree(target_backup, ignore_errors=True)
+    if errors:
+        return False, "\n".join(errors)
+    return True, f"Successfully reverted {restored_count} change(s) from backup {target_backup.name}."

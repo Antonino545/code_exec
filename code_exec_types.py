@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path.cwd().resolve()
 
 # Path components that plans may never touch.
-PROTECTED_NAMES = {".git"}
+PROTECTED_NAMES = {".git", ".code_exec"}
 
 # Sensitive file basenames and patterns that plans may never modify or delete.
 PROTECTED_FILE_EXACT = {
@@ -83,10 +83,13 @@ FORBIDDEN_RUN_SUBSTRINGS = (
     "chown -R",
 )
 
+# Shell chaining / redirection operators that invalidate automatic execution approval
+SHELL_CHAINING_OPERATORS = (";", "&&", "||", "|", "&", "`", "$(", "${")
+
 COMMANDS = {
     "CREATE", "EDIT", "DELETE", "MOVE", "COPY", "RENAME", "MKDIR",
     "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "RUN",
-    "COMMIT",
+    "COMMIT", "REPLACE_ALL", "CHMOD", "TOUCH", "PATCH",
 }
 
 

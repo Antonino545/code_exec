@@ -22,6 +22,7 @@ lines wrapped in `<<<` / `>>>`.
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import signal
 import subprocess
@@ -41,6 +42,7 @@ from code_exec_types import (
     PROTECTED_FILE_EXACT,
     PROTECTED_NAMES,
     PROTECTED_SUFFIXES,
+    SHELL_CHAINING_OPERATORS,
     CommandFailed,
     MatchResult,
     OpError,
@@ -65,7 +67,9 @@ from code_exec_matcher import (
     _match_line_spans,
     _normalize_jsx_line,
     _strip_symbols_and_emojis,
+    apply_unified_patch,
     find_unique,
+    parse_unified_diff,
 )
 
 # Re-export parser and clipboard
@@ -80,6 +84,7 @@ from code_exec_parser import (
 
 # Re-export filesystems and path/text helpers
 from code_exec_fs import (
+    BACKUP_ROOT,
     NEW_FILE_MODE,
     RealFS,
     VirtualFS,
@@ -89,6 +94,7 @@ from code_exec_fs import (
     read_text,
     rel,
     safe_path,
+    undo_last_run,
     with_newlines,
 )
 
@@ -110,6 +116,16 @@ def execute(op: Operation, fs) -> str | None:
             text += "\n"
         fs.write(path, text)
         return f"Created {args[0]}"
+
+    if command == "PATCH":
+        path = safe_path(args[0])
+        if not fs.is_file(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+        doc = fs.read(path)
+        newline = newline_style(doc)
+        new_doc, count = apply_unified_patch(doc, op.data or "", args[0], newline)
+        fs.write(path, new_doc)
+        return f"Patched {args[0]} ({count} hunk{'s' if count != 1 else ''})"
 
     if command in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
         path = safe_path(args[0])
@@ -143,29 +159,59 @@ def execute(op: Operation, fs) -> str | None:
                 if doc_indent and not _get_leading_indent(first_c):
                     content = newline.join((doc_indent + ln if ln.strip() else ln) for ln in content_lines)
 
+            content_clean = content[:-len(newline)] if content.endswith(newline) else content
             if command == "INSERT_BEFORE":
-                new = doc[: match.start] + content + newline + doc[match.start :]
+                new = doc[: match.start] + content_clean + newline + doc[match.start :]
                 done = "Inserted before marker in"
             else:
-                new = doc[: match.end] + newline + content + doc[match.end :]
+                new = doc[: match.end] + newline + content_clean + doc[match.end :]
                 done = "Inserted after marker in"
             note = match.note
 
         elif command == "APPEND":
             base = doc if (not doc or doc.endswith("\n")) else doc + newline
-            new = base + with_newlines(op.data, newline) + newline
+            content = with_newlines(op.data, newline)
+            if not content.endswith(newline):
+                content += newline
+            new = base + content
             note = ""
             done = "Appended to"
 
         else:
             bom = "\ufeff" if doc.startswith("\ufeff") else ""
-            new = bom + with_newlines(op.data, newline) + newline + doc[len(bom) :]
+            content = with_newlines(op.data, newline)
+            if not content.endswith(newline):
+                content += newline
+            new = bom + content + doc[len(bom) :]
             note = ""
             done = "Prepended to"
 
         fs.write(path, new)
         return f"{done} {args[0]}{note}"
-
+    if command == "REPLACE_ALL":
+        path = safe_path(args[0])
+        if not fs.is_file(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+        doc = fs.read(path)
+        newline = newline_style(doc)
+        search = with_newlines(op.data, newline)
+        replace = with_newlines(op.extra, newline)
+        if not search:
+            raise OpError(f"SEARCH block is empty for REPLACE_ALL in {args[0]}")
+        count = doc.count(search)
+        if count == 0:
+            raise OpError(f"ERR|SEARCH_NOT_FOUND|{args[0]} - pattern not found for REPLACE_ALL")
+        new = doc.replace(search, replace)
+        fs.write(path, new)
+        return f"Replaced {count} occurrence(s) in {args[0]}"
+    if command == "TOUCH":
+        path = safe_path(args[0], follow_leaf=False)
+        fs.touch(path)
+        return f"Touched {args[0]}"
+    if command == "CHMOD":
+        path = safe_path(args[0])
+        fs.chmod(path, args[1])
+        return f"Changed mode of {args[0]} to {args[1]}"
     if command == "DELETE":
         path = safe_path(args[0], follow_leaf=False)
         if not fs.lexists(path):
@@ -213,6 +259,78 @@ def check_paths(op: Operation) -> None:
         safe_path(value, follow_leaf=False)
 
 
+def generate_plan_diff(operations: list[Operation]) -> str:
+    """Generates unified diff text for all planned file modifications."""
+    vfs = VirtualFS()
+    diff_lines = []
+
+    for op in operations:
+        cmd = op.command
+        if cmd == "CREATE":
+            target = op.args[0]
+            new_text = op.data or ""
+            diff = difflib.unified_diff(
+                [],
+                new_text.splitlines(keepends=True),
+                fromfile="/dev/null",
+                tofile=f"b/{target}",
+            )
+            diff_lines.extend(diff)
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
+        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "REPLACE_ALL", "PATCH"}:
+            target = op.args[0]
+            try:
+                target_path = safe_path(target)
+                old_text = ""
+                if vfs.lexists(target_path):
+                    old_text = vfs.read(target_path)
+                elif target_path.is_file():
+                    old_text = read_text(target_path)
+                execute(op, vfs)
+                new_text = vfs.read(target_path)
+                diff = difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=f"a/{target}",
+                    tofile=f"b/{target}",
+                )
+                diff_lines.extend(diff)
+            except Exception:
+                pass
+        elif cmd in {"TOUCH", "CHMOD"}:
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
+        elif cmd == "DELETE":
+            target = op.args[0]
+            try:
+                target_path = safe_path(target)
+                old_text = ""
+                if target_path.is_file():
+                    old_text = read_text(target_path)
+                diff = difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    [],
+                    fromfile=f"a/{target}",
+                    tofile="/dev/null",
+                )
+                diff_lines.extend(diff)
+                execute(op, vfs)
+            except Exception:
+                pass
+        elif cmd in {"MOVE", "RENAME"}:
+            diff_lines.append(f"--- a/{op.args[0]}\n+++ b/{op.args[1]}\n@@ move/rename @@\n")
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
+    return "".join(diff_lines)
+
+
 def preflight(operations: list[Operation]) -> tuple[str | None, int]:
     vfs = VirtualFS()
     reason = None
@@ -229,9 +347,9 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
                 history = file_history.setdefault(path_str, [])
                 if op.command == "CREATE" and "CREATE" in history:
                     raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
-                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "CHMOD", "PATCH"}:
                     if "DELETE" in history:
-                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to EDIT a file that was DELETED in the same plan")
+                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to operate on a file that was DELETED in the same plan")
                 history.append(op.command)
 
     # Phase 2: Virtual Simulation
@@ -269,8 +387,89 @@ def describe_operation(op: Operation) -> str:
 # ============================================================
 # Main
 # ============================================================
+def _get_error_guidance(error_msg: str) -> str:
+    hints = []
+    if "ERR|SEARCH_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **SEARCH_NOT_FOUND**: The target SEARCH snippet does not exist in the file. "
+            "Inspect the 'Closest candidate' diff above: lines marked with '+' show the actual code currently in the file. "
+            "Update your SEARCH block to match those real lines verbatim."
+        )
+    if "ERR|SEARCH_AMBIGUOUS" in error_msg:
+        hints.append(
+            "- **SEARCH_AMBIGUOUS**: The SEARCH snippet matched multiple locations. "
+            "Include 1-3 lines of surrounding code before or after the target to form a unique local anchor."
+        )
+    if "ERR|SEARCH_TOO_BIG" in error_msg:
+        hints.append(
+            "- **SEARCH_TOO_BIG**: The SEARCH block is too large (max 60 lines / 4000 characters). "
+            "Shrink the SEARCH block to a 3-6 line unique local anchor rather than whole functions or components."
+        )
+    if "ERR|CREATE_EXISTS" in error_msg:
+        hints.append(
+            "- **CREATE_EXISTS**: The file already exists. "
+            "Use `EDIT <file>` or `REPLACE_ALL <file>` to modify existing files instead of CREATE."
+        )
+    if "ERR|FILE_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **FILE_NOT_FOUND**: The file to edit or insert into does not exist. "
+            "Verify the relative file path, or use `CREATE <file>` if you meant to create a new file."
+        )
+    if "ERR|CONFLICTING_OPERATIONS" in error_msg:
+        hints.append(
+            "- **CONFLICTING_OPERATIONS**: The plan contains contradictory operations on the same file. "
+            "Combine edits sequentially and never EDIT or APPEND after a DELETE."
+        )
+    if "ERR|MULTIPLE_PLANS" in error_msg:
+        hints.append(
+            "- **MULTIPLE_PLANS**: More than one plan block was detected. "
+            "Output exactly ONE single plan block in your response."
+        )
+    if "ERR|PLAN_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **PLAN_NOT_FOUND**: No executable plan block was detected. "
+            "Ensure your plan starts with an executable code_exec block."
+        )
+    if "ERR|FORBIDDEN_COMMAND" in error_msg:
+        hints.append(
+            "- **FORBIDDEN_COMMAND**: The RUN command is forbidden or destructive. "
+            "Use standard test runners (e.g. pytest, python3 -m unittest, npm test, cargo test)."
+        )
+    if "ERR|UNKNOWN_COMMAND" in error_msg:
+        hints.append(
+            f"- **UNKNOWN_COMMAND**: An unrecognized command was used. Supported commands: {', '.join(sorted(COMMANDS))}. "
+            "Check the suggested command hint in the error and update your instruction."
+        )
+    if "ERR|PATCH_FAILED" in error_msg:
+        hints.append(
+            "- **PATCH_FAILED**: A unified diff hunk could not be applied. "
+            "Verify the context lines against current file contents, or use EDIT with SEARCH/REPLACE instead."
+        )
+    if not hints:
+        hints.append("- Review the error details above and fix the problematic command or target block.")
+    return "\n".join(hints)
+
+
+def copy_error_to_clipboard(error_msg: str) -> None:
+    clean_err = error_msg.strip()
+    guidance = _get_error_guidance(clean_err)
+    fence = chr(96) * 3
+    prompt = (
+        "The previous `code_exec` plan failed with the following error:\n\n"
+        f"{fence}\n{clean_err}\n{fence}\n\n"
+        "### Troubleshooting Guidance:\n"
+        f"{guidance}\n\n"
+        "You may think and explain your analysis outside the code block. "
+        f"Then output a single revised {fence}code_exec ... {fence} block fixing the issue."
+    )
+    try:
+        set_clipboard(prompt)
+    except Exception:
+        pass
+
 
 def fail(message: str) -> int:
+    copy_error_to_clipboard(message)
     ui.error(message)
     return 1
 
@@ -287,19 +486,71 @@ def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
-    if not paths:
-        return False, "No modified files to commit."
-    try:
-        subprocess.run(["git", "add", "--", *paths], cwd=ROOT, check=True)
+def generate_commit_prompt() -> str:
+    """Collects git diff and untracked files into an AI prompt for commit generation."""
+    if not (ROOT / ".git").exists():
+        raise OpError("ERR|NOT_GIT_REPO|Current directory is not a git repository (.git missing)")
 
+    diff_res = subprocess.run(["git", "diff", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    diff_text = diff_res.stdout.strip()
+    if not diff_text:
+        diff_cached = subprocess.run(["git", "diff", "--cached"], cwd=ROOT, capture_output=True, text=True)
+        diff_unstaged = subprocess.run(["git", "diff"], cwd=ROOT, capture_output=True, text=True)
+        diff_text = f"{diff_cached.stdout}\n{diff_unstaged.stdout}".strip()
+
+    status_res = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True)
+    untracked = [line[3:].strip() for line in status_res.stdout.splitlines() if line.startswith("?? ")]
+
+    if not diff_text and not untracked:
+        raise OpError("No changes detected in git repository (working tree clean)")
+
+    sections = []
+    if diff_text:
+        sections.append(f"```diff\n{diff_text}\n```")
+    if untracked:
+        untracked_list = "\n".join(f"- {p}" for p in untracked)
+        sections.append(f"Untracked new files:\n{untracked_list}")
+
+    changes_body = "\n\n".join(sections)
+    return (
+        "Generate a concise, scoped conventional commit message for the following repository changes.\n\n"
+        f"{changes_body}\n\n"
+        "Output ONLY a single executable `code_exec` block:\n"
+        "```code_exec\n"
+        "COMMIT type(scope): concise summary\n"
+        "```"
+    )
+
+
+def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
+    try:
+        if not paths:
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            if not status_res.stdout.strip():
+                return False, "No changes detected in git repository to commit."
+            subprocess.run(["git", "add", "-A"], cwd=ROOT, check=True)
+            diff_cached = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            if not diff_cached.stdout.strip():
+                return False, "No staged changes detected in repository."
+            res = subprocess.run(
+                ["git", "commit", "-m", message],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            return True, res.stdout.strip()
+
+        subprocess.run(["git", "add", "--", *paths], cwd=ROOT, check=True)
         diff_cached = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
         )
         if not diff_cached.stdout.strip():
             return False, "No staged changes detected for modified files."
-
         res = subprocess.run(
             ["git", "commit", "-m", message, "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
@@ -342,16 +593,18 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
-                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
                     modified_paths.extend([op.args[0], op.args[1]])
 
     except CommandFailed as exc:
+        copy_error_to_clipboard(str(exc))
         ui.command_failed(str(exc), fs.backup_dir)
         return 1
-
     except (Exception, KeyboardInterrupt) as exc:
+        if not isinstance(exc, KeyboardInterrupt):
+            copy_error_to_clipboard(str(exc))
         ui.apply_interrupted(exc)
         count = len(fs.journal)
         errors = fs.rollback()
@@ -360,12 +613,12 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
             fs.cleanup()
         return 1
 
-    fs.cleanup()
+    fs.save_backup_manifest()
     has_git = (ROOT / ".git").exists()
     ui.done(has_git=has_git)
 
     if has_git and commit_msg and not no_commit:
-        should_commit = auto_commit or ui.prompt_commit(commit_msg)
+        should_commit = auto_commit or (not exec_ops) or ui.prompt_commit(commit_msg)
         if should_commit:
             unique_paths = list(dict.fromkeys(modified_paths))
             success, out = perform_git_commit(commit_msg, unique_paths)
@@ -386,13 +639,17 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
-                        help="Direct action: 'apply', 'run', 'theme', or 'update'")
+                        help="Direct action: 'apply', 'undo', 'theme', or 'update'")
     parser.add_argument("subarg", nargs="?", default=None,
                         help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
                         help="Show interactive usage guide and options")
+    parser.add_argument("-c", "--commit-prompt", "--docommit", dest="commit_prompt", action="store_true",
+                        help="Copy git diff prompt to clipboard for AI commit message generation")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
+    parser.add_argument("--diff", action="store_true",
+                        help="Display unified diff of file changes before applying")
     parser.add_argument("--clipboard", action="store_true",
                         help="Read instructions from clipboard (the default)")
     parser.add_argument("--file", help="Read instructions from a file ('-' for stdin)")
@@ -423,6 +680,15 @@ def main(argv=None) -> int:
     elif args.action in {"5", "update"}:
         from code_exec_updater import update_code_exec
         return 0 if update_code_exec() else 1
+    elif args.action in {"6", "undo"}:
+        success, msg = undo_last_run()
+        if success:
+            print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
+            return 0
+        return fail(msg)
+    elif args.action in {"7", "commit-prompt", "docommit", "commit"}:
+        args.commit_prompt = True
+        args.action = None
     elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
         print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
@@ -445,8 +711,21 @@ def main(argv=None) -> int:
     elif args.action and not args.file and not Path(args.action).exists():
         return fail(f"Unknown command or file: '{args.action}'. Run 'code-exec' without arguments for the menu.")
 
+    if args.clipboard:
+        args.action = "apply"
     is_interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-    has_flags = any([args.help, args.prompt, args.file, args.dry_run, args.yes, args.no_run, args.no_commit])
+    has_flags = any([
+        args.help,
+        args.prompt,
+        args.commit_prompt,
+        args.diff,
+        args.clipboard,
+        args.file,
+        args.dry_run,
+        args.yes,
+        args.no_run,
+        args.no_commit,
+    ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
         if choice in {"q", "quit", "exit", ""}:
@@ -463,12 +742,29 @@ def main(argv=None) -> int:
         elif choice in {"5", "u", "update"}:
             from code_exec_updater import update_code_exec
             return 0 if update_code_exec() else 1
+        elif choice in {"6", "undo"}:
+            success, msg = undo_last_run()
+            if success:
+                print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
+                return 0
+            return fail(msg)
+        elif choice in {"7", "c", "commit", "commit-prompt", "docommit"}:
+            args.commit_prompt = True
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
 
     if args.help:
         ui.show_guide()
+        return 0
+
+    if args.commit_prompt:
+        try:
+            prompt_body = generate_commit_prompt()
+            set_clipboard(prompt_body)
+        except Exception as exc:
+            return fail(f"Could not generate commit prompt: {exc}")
+        ui.commit_prompt_copied(len(prompt_body))
         return 0
 
     if args.prompt:
@@ -506,7 +802,7 @@ def main(argv=None) -> int:
 
     try:
         operations = parse_operations(plan_text)
-    except ValueError as exc:
+    except (ValueError, OpError) as exc:
         return fail(f"Could not parse instructions: {exc}")
 
     if not operations:
@@ -523,12 +819,16 @@ def main(argv=None) -> int:
     ui.header(ROOT)
     ui.show_plan(operations, reason, deferred)
 
+    diff_text = generate_plan_diff(operations)
+    if args.diff:
+        ui.show_diff(diff_text)
+
     if args.dry_run:
         ui.dry_run()
         return 0
 
     if not args.yes:
-        if not ui.confirm():
+        if not ui.confirm(diff_text=diff_text):
             ui.cancelled()
             return 0
 

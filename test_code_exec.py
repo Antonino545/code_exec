@@ -10,6 +10,7 @@ from code_exec import (
     extract_plan,
     find_unique,
     parse_operations,
+    preflight,
     safe_path,
 )
 
@@ -35,6 +36,38 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertEqual(ops[0].command, "CREATE")
         self.assertEqual(ops[0].args[0], "sample.txt")
         self.assertEqual(ops[0].data, "hello world")
+
+    def test_plan_without_think_block(self):
+        fence = chr(96) * 3
+        ai_response = (
+            f"Explanation outside.\n\n"
+            f"{fence}code_exec\n"
+            f"CREATE sample_no_think.txt\n"
+            f"<<<\n"
+            f"content without think block\n"
+            f">>>\n"
+            f"{fence}\n\n"
+            f"Done."
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "sample_no_think.txt")
+        self.assertEqual(ops[0].data, "content without think block")
+
+    def test_raw_plan_without_think_block(self):
+        raw_response = (
+            "CREATE sample_raw.txt\n"
+            "<<<\n"
+            "raw content\n"
+            ">>>\n"
+        )
+        plan = extract_plan(raw_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "sample_raw.txt")
 
     def test_markdown_with_unrelated_code_blocks(self):
         ai_response = (
@@ -253,6 +286,11 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             validate_run_command("python3 -c 'import os'")
         self.assertIn("ERR|FORBIDDEN_COMMAND", str(ctx.exception))
 
+        # Whitelisted commands with shell operators must require interactive confirmation
+        self.assertTrue(validate_run_command("pytest tests/ && echo ok"))
+        self.assertTrue(validate_run_command("cargo test; ls"))
+        self.assertTrue(validate_run_command("npm test | cat"))
+
         # Forbidden dangerous commands fail
         with self.assertRaises(OpError) as ctx:
             validate_run_command("rm -rf /")
@@ -287,6 +325,22 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             self.assertEqual(meta["message"], "feat: test commit")
             self.assertEqual(meta["author"], "Antonino")
 
+    def test_search_too_big_rejection(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_big_search.txt"
+        vfs.write(test_file, "\n".join(f"line {i}" for i in range(100)) + "\n")
+        # Create oversized search block (>60 lines)
+        big_search = "\n".join(f"line {i}" for i in range(70)) + "\n"
+        op = Operation(
+            "EDIT",
+            ("test_big_search.txt",),
+            big_search,
+            "replaced\n",
+        )
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|SEARCH_TOO_BIG", str(ctx.exception))
+
     def test_fuzzy_search_fallback_above_90_percent(self):
         vfs = VirtualFS()
         test_file = ROOT / "test_fuzzy.txt"
@@ -301,6 +355,51 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         )
         execute(op, vfs)
         self.assertIn("line 2: temperature = 22.0°", vfs.read(test_file))
+
+    def test_fuzzy_search_python_code(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_code.py"
+        vfs.write(test_file, "def calculate_total(price, tax=0.22):\n    return price * (1 + tax)\n")
+
+        # Search query with minor parameter rename / space drift (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("test_code.py",),
+            "def calculate_total(price, tax = 0.20):\n    return price * (1 + tax)\n",
+            "def calculate_total(price, tax=0.25):\n    return price * (1 + tax)\n",
+        )
+        execute(op, vfs)
+        self.assertIn("tax=0.25", vfs.read(test_file))
+
+    def test_fuzzy_search_jsx_component(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "TestComp.jsx"
+        vfs.write(test_file, "export function Header({ title, active }) {\n  return <nav className=\"navbar primary\">{title}</nav>;\n}\n")
+
+        # Search query with modified className attribute value (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("TestComp.jsx",),
+            "export function Header({ title, active }) {\n  return <nav className=\"navbar secondary\">{title}</nav>;\n}\n",
+            "export function Header({ title, active }) {\n  return <nav className=\"navbar fixed\">{title}</nav>;\n}\n",
+        )
+        execute(op, vfs)
+        self.assertIn("navbar fixed", vfs.read(test_file))
+
+    def test_fuzzy_search_html_template(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "template.html"
+        vfs.write(test_file, "<div class=\"card shadow-lg p-4\">\n  <h1>Welcome back</h1>\n</div>\n")
+
+        # Search query with spacing and class attribute variation (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("template.html",),
+            "<div class=\"card shadow-sm p-4\">\n  <h1>Welcome back</h1>\n</div>\n",
+            "<div class=\"card shadow-lg p-6\">\n  <h1>Welcome home</h1>\n</div>\n",
+        )
+        execute(op, vfs)
+        self.assertIn("Welcome home", vfs.read(test_file))
 
     def test_sandboxed_command_builder(self):
         from code_exec import build_sandboxed_command
@@ -374,6 +473,322 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertEqual(ops[0].command, "CREATE")
         self.assertIn("```python", ops[0].data)
         self.assertEqual(ops[1].command, "COMMIT")
+
+    def test_edit_preserves_single_trailing_newline(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_newline_drift.txt"
+        vfs.write(test_file, "line 1\nline 2: to replace\nline 3\n")
+        op = Operation(
+            "EDIT",
+            ("test_newline_drift.txt",),
+            "line 2: to replace\n",
+            "line 2: replaced\n",
+        )
+        execute(op, vfs)
+        self.assertEqual(vfs.read(test_file), "line 1\nline 2: replaced\nline 3\n")
+
+    def test_generate_plan_diff(self):
+        from code_exec import generate_plan_diff
+        ops = [Operation("CREATE", ("sample_diff.txt",), "first line\nsecond line\n")]
+        diff = generate_plan_diff(ops)
+        self.assertIn("+first line", diff)
+        self.assertIn("+second line", diff)
+
+    def test_patch_command_single_hunk(self):
+        vfs = VirtualFS()
+        target = ROOT / "patch_target.txt"
+        vfs.write(target, "line 1\nline 2\nline 3\n")
+        patch_text = (
+            "--- a/patch_target.txt\n"
+            "+++ b/patch_target.txt\n"
+            "@@ -1,3 +1,3 @@\n"
+            " line 1\n"
+            "-line 2\n"
+            "+line 2 modified\n"
+            " line 3\n"
+        )
+        op = Operation("PATCH", ("patch_target.txt",), patch_text)
+        msg = execute(op, vfs)
+        self.assertIn("Patched patch_target.txt (1 hunk)", msg)
+        self.assertEqual(vfs.read(target), "line 1\nline 2 modified\nline 3\n")
+
+    def test_patch_command_multi_hunk_with_drift(self):
+        vfs = VirtualFS()
+        target = ROOT / "multi_patch.py"
+        initial = "\n".join([f"line {i}" for i in range(1, 21)]) + "\n"
+        vfs.write(target, initial)
+        patch_text = (
+            "@@ -3,3 +3,5 @@\n"
+            " line 3\n"
+            "-line 4\n"
+            "+line 4.1\n"
+            "+line 4.2\n"
+            "+line 4.3\n"
+            " line 5\n"
+            "@@ -15,3 +15,3 @@\n"
+            " line 15\n"
+            "-line 16\n"
+            "+line 16 modified\n"
+            " line 17\n"
+        )
+        op = Operation("PATCH", ("multi_patch.py",), patch_text)
+        msg = execute(op, vfs)
+        self.assertIn("Patched multi_patch.py (2 hunks)", msg)
+        result = vfs.read(target)
+        self.assertIn("line 4.1\nline 4.2\nline 4.3", result)
+        self.assertIn("line 16 modified", result)
+
+    def test_patch_command_line_offset_drift_tolerance(self):
+        vfs = VirtualFS()
+        target = ROOT / "drift_patch.txt"
+        vfs.write(target, "header\nline a\nline b\nline c\nfooter\n")
+        patch_text = (
+            "@@ -80,3 +80,3 @@\n"
+            " line a\n"
+            "-line b\n"
+            "+line b drifted\n"
+            " line c\n"
+        )
+        op = Operation("PATCH", ("drift_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertIn("line b drifted", vfs.read(target))
+
+    def test_patch_command_failure_reporting(self):
+        vfs = VirtualFS()
+        target = ROOT / "fail_patch.txt"
+        vfs.write(target, "alpha\nbeta\ngamma\n")
+        patch_text = (
+            "@@ -1,3 +1,3 @@\n"
+            " nonexistent 1\n"
+            "-nonexistent 2\n"
+            "+replacement\n"
+            " nonexistent 3\n"
+        )
+        op = Operation("PATCH", ("fail_patch.txt",), patch_text)
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|PATCH_FAILED|fail_patch.txt", str(ctx.exception))
+
+    def test_undo_functionality(self):
+        from code_exec import undo_last_run, apply_plan
+        target = ROOT / "test_undo_target.txt"
+        target.write_text("v1 content\n", encoding="utf-8")
+        try:
+            ops = [Operation("EDIT", ("test_undo_target.txt",), "v1 content\n", "v2 content\n")]
+            res = apply_plan(ops, timeout=60, no_commit=True, auto_commit=True)
+            self.assertEqual(res, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "v2 content\n")
+            success, msg = undo_last_run()
+            self.assertTrue(success)
+            self.assertEqual(target.read_text(encoding="utf-8"), "v1 content\n")
+        finally:
+            if target.exists():
+                target.unlink()
+
+    def test_hallucinated_unknown_commands(self):
+        tests = [
+            ("UPDATE file.txt", "EDIT"),
+            ("MODIFY file.txt", "EDIT"),
+            ("WRITE file.txt", "CREATE"),
+            ("APPEND_LINE file.txt", "APPEND"),
+            ("COMMITT msg", "COMMIT"),
+        ]
+        for cmd, expected_hint in tests:
+            with self.assertRaises(OpError) as ctx:
+                parse_operations(f"{cmd}\n<<<\ncontent\n>>>\n")
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+            self.assertIn(f"Did you mean '{expected_hint}'?", str(ctx.exception))
+
+    def test_hallucinated_bare_runner_command_hint(self):
+        for runner in ["npm test", "pytest", "python script.py", "git status"]:
+            with self.assertRaises(OpError) as ctx:
+                parse_operations(runner)
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+            self.assertIn("Shell commands must be prefixed with RUN", str(ctx.exception))
+
+    def test_hallucinated_edit_keywords(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations("EDIT file.txt\nFIND\n<<<\nold\n>>>\nREPLACE\n<<<\nnew\n>>>\n")
+        self.assertIn("EDIT requires SEARCH", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations("EDIT file.txt\nSEARCH\n<<<\nold\n>>>\nWITH\n<<<\nnew\n>>>\n")
+        self.assertIn("EDIT requires REPLACE", str(ctx.exception))
+
+    def test_hallucinated_move_syntax(self):
+        for bad_move in ["MOVE old.txt to new.txt", "MOVE old.txt new.txt", "COPY old.txt destination/"]:
+            with self.assertRaises(ValueError) as ctx:
+                parse_operations(bad_move)
+            self.assertIn("requires 'source -> destination'", str(ctx.exception))
+
+    def test_hallucinated_shell_commands_without_run(self):
+        for cmd in ["npm test", "git commit -m 'update'", "pytest", "pip install -r requirements.txt"]:
+            with self.assertRaises(OpError) as ctx:
+                parse_operations(cmd)
+            self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+
+    def test_hallucinated_conversational_text_inside_plan(self):
+        plan = (
+            "Here is how we update the code:\n"
+            "CREATE test.txt\n"
+            "<<<\n"
+            "hello\n"
+            ">>>\n"
+        )
+        with self.assertRaises(OpError) as ctx:
+            parse_operations(plan)
+        self.assertIn("ERR|UNKNOWN_COMMAND", str(ctx.exception))
+
+    def test_hallucinated_unclosed_block(self):
+        plan = (
+            "CREATE unclosed.txt\n"
+            "<<<\n"
+            "line 1\n"
+            "line 2\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations(plan)
+        self.assertIn("Missing >>>", str(ctx.exception))
+
+
+    def test_main_commit_prompt_flag_bypasses_menu(self):
+        from unittest.mock import patch
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("code_exec.generate_commit_prompt", return_value="COMMIT test: mock"), \
+             patch("code_exec.set_clipboard"), \
+             patch("code_exec.ui.commit_prompt_copied"):
+            from code_exec import main
+            ret = main(["-c"])
+            self.assertEqual(ret, 0)
+
+    def test_parser_tilde_fences(self):
+        plan_text = (
+            "Here is the plan:\n\n"
+            "~~~code_exec\n"
+            "CREATE tilde_test.txt\n"
+            "<<<\n"
+            "tilde fence content\n"
+            ">>>\n"
+            "~~~\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "tilde_test.txt")
+
+    def test_parser_indented_fences(self):
+        plan_text = (
+            "Indented block:\n\n"
+            "    ```code_exec\n"
+            "    CREATE indented.txt\n"
+            "    <<<\n"
+            "    content\n"
+            "    >>>\n"
+            "    ```\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "indented.txt")
+
+    def test_parser_quadruple_backticks_with_nested_blocks(self):
+        quad = "`" * 4
+        tri = "`" * 3
+        plan_text = (
+            f"{quad}code_exec\n"
+            "CREATE nested_doc.md\n"
+            "<<<\n"
+            f"{tri}python\n"
+            "print('inner')\n"
+            f"{tri}\n"
+            ">>>\n"
+            f"{quad}\n"
+        )
+        plan = extract_plan(plan_text)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertIn("```python", ops[0].data)
+
+    def test_parser_interspersed_comments_and_blank_lines(self):
+        plan_text = (
+            "# Top level comment\n"
+            "\n"
+            "CREATE file_with_comments.txt\n"
+            "# Mid-level explanation\n"
+            "<<<\n"
+            "payload\n"
+            ">>>\n"
+            "\n"
+            "# Final comment\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+
+    def test_patch_crlf_target(self):
+        vfs = VirtualFS()
+        target = ROOT / "crlf_patch.txt"
+        vfs.write(target, "first line\r\nsecond line\r\nthird line\r\n")
+        patch_text = (
+            "@@ -1,3 +1,3 @@\n"
+            " first line\n"
+            "-second line\n"
+            "+second line patched\n"
+            " third line\n"
+        )
+        op = Operation("PATCH", ("crlf_patch.txt",), patch_text)
+        execute(op, vfs)
+        result = vfs.read(target)
+        self.assertIn("second line patched", result)
+        self.assertIn("\r\n", result)
+
+    def test_patch_prepend_at_top_of_file(self):
+        vfs = VirtualFS()
+        target = ROOT / "prepend_patch.txt"
+        vfs.write(target, "entry 1\nentry 2\n")
+        patch_text = (
+            "@@ -1,2 +1,3 @@\n"
+            "+entry 0\n"
+            " entry 1\n"
+            " entry 2\n"
+        )
+        op = Operation("PATCH", ("prepend_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertEqual(vfs.read(target), "entry 0\nentry 1\nentry 2\n")
+
+    def test_patch_delete_entire_content(self):
+        vfs = VirtualFS()
+        target = ROOT / "clear_patch.txt"
+        vfs.write(target, "to be removed 1\nto be removed 2\n")
+        patch_text = (
+            "@@ -1,2 +0,0 @@\n"
+            "-to be removed 1\n"
+            "-to be removed 2\n"
+        )
+        op = Operation("PATCH", ("clear_patch.txt",), patch_text)
+        execute(op, vfs)
+        self.assertEqual(vfs.read(target).strip(), "")
+
+    def test_preflight_prevent_duplicate_delete(self):
+        ops = [
+            Operation("DELETE", ("dup_del.txt",)),
+            Operation("DELETE", ("dup_del.txt",)),
+        ]
+        # Deleting already-deleted file must fail preflight simulation
+        with self.assertRaises(OpError) as ctx:
+            preflight(ops)
+        self.assertIn("ERR|DELETE_NOT_FOUND", str(ctx.exception))
+
+    def test_preflight_prevent_patch_after_delete(self):
+        ops = [
+            Operation("DELETE", ("deleted.txt",)),
+            Operation("PATCH", ("deleted.txt",), "@@ -1,1 +1,1 @@\n-a\n+b\n"),
+        ]
+        with self.assertRaises(OpError) as ctx:
+            preflight(ops)
+        self.assertIn("ERR|CONFLICTING_OPERATIONS", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import subprocess
@@ -7,6 +8,25 @@ import sys
 from pathlib import Path
 
 from code_exec_types import COMMANDS, Operation, OpError, clean_path
+
+COMMAND_ALIASES = {
+    "UPDATE": "EDIT",
+    "MODIFY": "EDIT",
+    "CHANGE": "EDIT",
+    "WRITE": "CREATE",
+    "NEW": "CREATE",
+    "ADD": "CREATE",
+    "REMOVE": "DELETE",
+    "RM": "DELETE",
+    "DEL": "DELETE",
+    "MV": "MOVE",
+    "CP": "COPY",
+    "APPEND_LINE": "APPEND",
+    "PREPEND_LINE": "PREPEND",
+    "RUN_COMMAND": "RUN",
+    "EXEC": "RUN",
+    "EXECUTE": "RUN",
+}
 
 
 def get_clipboard() -> str:
@@ -180,16 +200,18 @@ def extract_plan(text: str) -> str:
     cand_idx = 0
     while cand_idx < len(cand_lines) and cand_lines[cand_idx].strip().startswith("#"):
         cand_idx += 1
-
-    if cand_idx < len(cand_lines) and cand_lines[cand_idx].strip() == "THINK":
-        has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
-        has_command = any(
-            re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
-            for ln in cand_lines
-        )
-        if has_end_think and has_command:
+    if cand_idx < len(cand_lines):
+        first_word = cand_lines[cand_idx].strip().split()[0]
+        if first_word == "THINK":
+            has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
+            has_command = any(
+                re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
+                for ln in cand_lines
+            )
+            if has_end_think and has_command:
+                return candidate
+        elif first_word in COMMANDS:
             return candidate
-
     raise OpError("ERR|PLAN_NOT_FOUND")
 
 
@@ -213,9 +235,8 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
             raise ValueError("Missing >>> for block opened with <<<")
         return "\n".join(lines[start:k]), k + 1
 
-    while j < len(lines) and not lines[j].strip():
+    while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
         j += 1
-
     if j < len(lines) and lines[j].strip().startswith("<<<"):
         start = j + 1
         k = start
@@ -242,7 +263,7 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
 
 
 def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tuple[int, bool]:
-    while i < len(lines) and not lines[i].strip():
+    while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("#")):
         i += 1
     if i >= len(lines):
         raise ValueError(f"{command} requires {keyword} (line {i + 1})")
@@ -257,9 +278,18 @@ def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tupl
 def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     line = lines[i].strip()
     match = re.match(r"^([A-Z_]+)(?:\s+(.*))?$", line)
-
-    if not match or match.group(1) not in COMMANDS:
-        raise ValueError(f"Unknown instruction: {line!r}")
+    raw_cmd = match.group(1) if match else line.split()[0]
+    cmd = raw_cmd.strip()
+    if not match or cmd not in COMMANDS:
+        cmd_upper = cmd.upper()
+        if cmd_upper in COMMAND_ALIASES:
+            hint = f" Did you mean '{COMMAND_ALIASES[cmd_upper]}'?"
+        elif cmd.lower() in {"npm", "pnpm", "yarn", "pytest", "python", "python3", "cargo", "go", "ruff", "black", "git"}:
+            hint = f" Shell commands must be prefixed with RUN. Did you mean 'RUN {line}'?"
+        else:
+            matches = difflib.get_close_matches(cmd_upper, sorted(COMMANDS), n=1, cutoff=0.6)
+            hint = f" Did you mean '{matches[0]}'?" if matches else ""
+        raise OpError(f"ERR|UNKNOWN_COMMAND|{cmd} - Unsupported command.{hint}")
 
     command = match.group(1)
     rest = (match.group(2) or "").strip()
@@ -277,9 +307,14 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
             raise ValueError(f"{command} requires 'source -> destination'")
         return Operation(command, (clean_path(pair[1]), clean_path(pair[2]))), i
 
-    path = clean_path(rest)
+    if command == "CHMOD":
+        parts = rest.rsplit(None, 1)
+        if len(parts) != 2:
+            raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
+        return Operation("CHMOD", (clean_path(parts[0]), parts[1].strip())), i
 
-    if command in {"DELETE", "MKDIR"}:
+    path = clean_path(rest)
+    if command in {"DELETE", "MKDIR", "TOUCH"}:
         return Operation(command, (path,)), i
 
     inline_block = False
@@ -289,16 +324,16 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
 
     path = clean_path(rest)
 
-    if command in {"CREATE", "APPEND", "PREPEND"}:
+    if command in {"CREATE", "APPEND", "PREPEND", "PATCH"}:
         content, i = read_block(lines, i, inline_started=inline_block)
         return Operation(command, (path,), content), i
 
-    if command == "EDIT":
+    if command in {"EDIT", "REPLACE_ALL"}:
         i, search_inline = expect_keyword(lines, i, "SEARCH", command)
         search, i = read_block(lines, i, inline_started=search_inline)
         i, replace_inline = expect_keyword(lines, i, "REPLACE", command)
         replace, i = read_block(lines, i, inline_started=replace_inline)
-        return Operation("EDIT", (path,), search, replace), i
+        return Operation(command, (path,), search, replace), i
 
     # INSERT_BEFORE / INSERT_AFTER
     i, marker_inline = expect_keyword(lines, i, "MARKER", command)
@@ -333,6 +368,8 @@ def parse_operations(text: str) -> list[Operation]:
         lineno = i + 1
         try:
             operation, i = _parse_instruction(lines, i)
+        except OpError as exc:
+            raise OpError(f"line {lineno}: {exc}") from None
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
         operations.append(operation)

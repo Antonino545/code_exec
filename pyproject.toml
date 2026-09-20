@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-exec"
+version = "1.3.0"
+description = "Deterministic local code executor and guardrailed runtime for AI coding workflows"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Antonino" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Code Generators",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.scripts]
+code-exec = "code_exec:main"
+
+[tool.setuptools]
+py-modules = [
+    "code_exec",
+    "code_exec_fs",
+    "code_exec_matcher",
+    "code_exec_parser",
+    "code_exec_sandbox",
+    "code_exec_types",
+    "code_exec_ui",
+    "code_exec_updater",
+]

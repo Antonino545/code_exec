@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import difflib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from code_exec_types import MatchResult, OpError
 from code_exec_ui import ui
+
+
+@dataclass
+class Hunk:
+    old_start: int
+    old_len: int
+    new_start: int
+    new_len: int
+    lines: list[tuple[str, str]]
 
 
 def _get_leading_indent(s: str) -> str:
@@ -31,7 +41,9 @@ def _strip_symbols_and_emojis(line: str) -> str:
     return " ".join(s.split())
 
 
-def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[tuple[int, int, int, int]]:
+def _match_line_spans(
+    doc_lines: list[str], want: list[str], mode: str, capture_newline: bool = False
+) -> list[tuple[int, int, int, int]]:
     """
     Find matching line spans across various normalization modes.
     Returns list of (start_char_offset, end_char_offset, start_line_idx, end_line_idx).
@@ -47,7 +59,6 @@ def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[
 
     size = len(want)
     spans = []
-
     for i in range(len(doc_lines) - size + 1):
         matched = False
         if mode == "trailing":
@@ -63,15 +74,20 @@ def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[
 
         if matched:
             last = i + size - 1
-            tail = doc_lines[last]
-            if tail.endswith("\r"):
-                tail = tail[:-1]
-            spans.append((offsets[i], offsets[last] + len(tail), i, last))
-
+            if capture_newline and last + 1 < len(offsets):
+                end_pos = offsets[last + 1]
+            else:
+                tail = doc_lines[last]
+                if tail.endswith("\r"):
+                    tail = tail[:-1]
+                end_pos = offsets[last] + len(tail)
+            spans.append((offsets[i], end_pos, i, last))
     return spans
 
 
-def _find_high_similarity_match(doc: str, needle: str, threshold: float = 0.88) -> tuple[int, int, int, int, float] | None:
+def _find_high_similarity_match(
+    doc: str, needle: str, threshold: float = 0.88, capture_newline: bool = False
+) -> tuple[int, int, int, int, float] | None:
     """
     Locates a uniquely matching line block with >= threshold structural similarity,
     ignoring emojis, symbols, and minor attribute drifts.
@@ -123,10 +139,13 @@ def _find_high_similarity_match(doc: str, needle: str, threshold: float = 0.88) 
             return None
 
     start_offset = offsets[best_start]
-    tail = doc_lines[best_end]
-    if tail.endswith("\r"):
-        tail = tail[:-1]
-    end_offset = offsets[best_end] + len(tail)
+    if capture_newline and best_end + 1 < len(offsets):
+        end_offset = offsets[best_end + 1]
+    else:
+        tail = doc_lines[best_end]
+        if tail.endswith("\r"):
+            tail = tail[:-1]
+        end_offset = offsets[best_end] + len(tail)
     return (start_offset, end_offset, best_start, best_end, best_r)
 
 
@@ -170,7 +189,6 @@ def _find_closest_match(doc: str, needle: str) -> str:
         start_line = best_start + 1
         end_line = best_end + 1
         pct = int(best_ratio * 100)
-
         diff = list(
             difflib.unified_diff(
                 needle_lines,
@@ -183,14 +201,18 @@ def _find_closest_match(doc: str, needle: str) -> str:
         diff_text = "\n".join(diff[:16])
         if len(diff) > 16:
             diff_text += f"\n... ({len(diff) - 16} more diff lines)"
-
         return (
             f"\n\nClosest candidate found at lines {start_line}-{end_line} ({pct}% similarity):\n"
             f"------------------------------------------------------------\n"
             f"{diff_text}\n"
-            f"------------------------------------------------------------"
+            f"------------------------------------------------------------\n"
+            f"(Note for LLM: Lines starting with '+' show actual file content. Update your SEARCH block to match.)"
         )
     return ""
+
+
+MAX_SEARCH_LINES = 60
+MAX_SEARCH_CHARS = 4000
 
 
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
@@ -208,6 +230,15 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         raise OpError(f"{what} block is empty")
 
     err_prefix = "SEARCH" if what == "SEARCH" else what
+
+    # Guard against oversized search blocks in large files
+    needle_lines_count = len(needle.split("\n"))
+    needle_char_count = len(needle)
+    if needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS:
+        raise OpError(
+            f"ERR|SEARCH_TOO_BIG|{target}|({needle_lines_count} lines, {needle_char_count} chars) - "
+            f"SEARCH block exceeds maximum allowed limit ({MAX_SEARCH_LINES} lines, {MAX_SEARCH_CHARS} chars)."
+        )
 
     # ---- Tier 1: Exact match ----
     count = doc.count(needle)
@@ -228,9 +259,11 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     if not want_raw:
         raise OpError(f"{what} block is empty")
 
+    capture_nl = needle.endswith("\n")
+
     # ---- Tier 2: Trailing whitespace tolerant ----
     want_trailing = [ln.rstrip("\r ") for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_trailing, mode="trailing")
+    spans = _match_line_spans(doc_lines, want_trailing, mode="trailing", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched ignoring trailing whitespace)", True, (i, last))
@@ -239,7 +272,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 3: Indentation tolerant ----
     want_indent = [ln.strip() for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_indent, mode="indent")
+    spans = _match_line_spans(doc_lines, want_indent, mode="indent", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with indentation tolerance)", True, (i, last))
@@ -248,7 +281,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 4: Harmless whitespace normalization (spaces collapsed) ----
     want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_ws, mode="whitespace")
+    spans = _match_line_spans(doc_lines, want_ws, mode="whitespace", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with whitespace normalization)", True, (i, last))
@@ -257,7 +290,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 5: JSX-aware line match ----
     want_jsx = [_normalize_jsx_line(ln) for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_jsx, mode="jsx")
+    spans = _match_line_spans(doc_lines, want_jsx, mode="jsx", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with JSX normalization)", True, (i, last))
@@ -265,12 +298,16 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
 
     # ---- Tier 6: High-similarity fuzzy match (>= 90%) ----
-    fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90)
+    fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90, capture_newline=capture_nl)
     if fuzzy is not None:
         start, end, s_line, e_line, sim = fuzzy
         pct = int(sim * 100)
-        ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {s_line + 1}-{e_line + 1}")
-        return MatchResult(start, end, f" (fuzzy matched with {pct}% similarity)", True, (s_line, e_line))
+        if pct < 100:
+            ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {s_line + 1}-{e_line + 1}")
+            note = f" (fuzzy matched with {pct}% similarity)"
+        else:
+            note = " (matched ignoring non-standard symbols)"
+        return MatchResult(start, end, note, True, (s_line, e_line))
 
     # ---- Diagnostic failure ----
     diagnostic = _find_closest_match(doc, needle)
@@ -287,7 +324,6 @@ def _adjust_indentation(doc: str, line_range: tuple[int, int], search_text: str,
 
     search_lines = [ln for ln in search_text.split("\n") if ln.strip()]
     replace_lines = replace_text.split(newline)
-
     if not search_lines or not [ln for ln in replace_lines if ln.strip()]:
         return replace_text
 
@@ -307,3 +343,191 @@ def _adjust_indentation(doc: str, line_range: tuple[int, int], search_text: str,
         return newline.join(adjusted)
 
     return replace_text
+
+
+def parse_unified_diff(patch_text: str, target: str = "") -> list[Hunk]:
+    """Parses standard unified diff text into structured Hunk objects."""
+    clean_text = patch_text.replace("\r\n", "\n")
+    raw_lines = clean_text.split("\n")
+    hunks: list[Hunk] = []
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i]
+        m = re.match(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@", line)
+        if m:
+            old_start = int(m.group(1))
+            old_len = int(m.group(2)) if m.group(2) is not None else 1
+            new_start = int(m.group(3))
+            new_len = int(m.group(4)) if m.group(4) is not None else 1
+            hunk_lines: list[tuple[str, str]] = []
+            i += 1
+            while i < len(raw_lines):
+                curr = raw_lines[i]
+                if curr.startswith("@@"):
+                    break
+                if curr.startswith("+"):
+                    hunk_lines.append(("+", curr[1:]))
+                elif curr.startswith("-"):
+                    hunk_lines.append(("-", curr[1:]))
+                elif curr.startswith(" "):
+                    hunk_lines.append((" ", curr[1:]))
+                elif curr.startswith("\\"):
+                    pass
+                elif curr == "":
+                    old_count = sum(1 for tag, _ in hunk_lines if tag in {" ", "-"})
+                    if old_len > 0 and old_count >= old_len and (i == len(raw_lines) - 1 or raw_lines[i + 1].startswith("@@")):
+                        pass
+                    else:
+                        hunk_lines.append((" ", ""))
+                else:
+                    hunk_lines.append((" ", curr))
+                i += 1
+            hunks.append(Hunk(old_start, old_len, new_start, new_len, hunk_lines))
+        else:
+            i += 1
+    if not hunks:
+        raise OpError(f"ERR|PATCH_FAILED|{target} - No valid diff hunks (@@ -start,len +start,len @@) found in PATCH content")
+    return hunks
+
+
+def apply_unified_patch(doc: str, patch_text: str, target: str, newline: str = "\n") -> tuple[str, int]:
+    """Applies a multi-hunk unified diff with fuzzy line offset and whitespace tolerance."""
+    clean_doc = doc.replace("\r\n", "\n")
+    doc_lines = clean_doc.split("\n")
+    hunks = parse_unified_diff(patch_text, target)
+    current_offset = 0
+    last_match_end = 0
+
+    for hunk_idx, hunk in enumerate(hunks, 1):
+        old_lines = [text for tag, text in hunk.lines if tag in {" ", "-"}]
+        new_lines = [text for tag, text in hunk.lines if tag in {" ", "+"}]
+
+        if not old_lines:
+            target_idx = max(0, hunk.old_start + current_offset)
+            target_idx = max(last_match_end, min(target_idx, len(doc_lines)))
+            doc_lines[target_idx:target_idx] = new_lines
+            current_offset += len(new_lines)
+            last_match_end = target_idx + len(new_lines)
+            continue
+
+        k = len(old_lines)
+        target_idx = (hunk.old_start - 1) + current_offset
+        target_idx = max(last_match_end, min(target_idx, max(0, len(doc_lines) - k)))
+
+        matched_span: tuple[int, int] | None = None
+        match_mode = "exact"
+
+        # Tier 1: Exact match
+        if target_idx + k <= len(doc_lines) and doc_lines[target_idx : target_idx + k] == old_lines:
+            matched_span = (target_idx, target_idx + k)
+        else:
+            candidates = [
+                j for j in range(last_match_end, len(doc_lines) - k + 1)
+                if doc_lines[j : j + k] == old_lines
+            ]
+            if candidates:
+                best_j = min(candidates, key=lambda j: abs(j - target_idx))
+                matched_span = (best_j, best_j + k)
+
+        # Tier 2: Trailing whitespace tolerance
+        if matched_span is None:
+            want_trailing = [ln.rstrip("\r ") for ln in old_lines]
+            if target_idx + k <= len(doc_lines) and [ln.rstrip("\r ") for ln in doc_lines[target_idx : target_idx + k]] == want_trailing:
+                matched_span = (target_idx, target_idx + k)
+                match_mode = "trailing"
+            else:
+                candidates = [
+                    j for j in range(last_match_end, len(doc_lines) - k + 1)
+                    if [ln.rstrip("\r ") for ln in doc_lines[j : j + k]] == want_trailing
+                ]
+                if candidates:
+                    best_j = min(candidates, key=lambda j: abs(j - target_idx))
+                    matched_span = (best_j, best_j + k)
+                    match_mode = "trailing"
+
+        # Tier 3: Indentation tolerance
+        if matched_span is None:
+            want_indent = [ln.strip() for ln in old_lines]
+            if target_idx + k <= len(doc_lines) and [ln.strip() for ln in doc_lines[target_idx : target_idx + k]] == want_indent:
+                matched_span = (target_idx, target_idx + k)
+                match_mode = "indent"
+            else:
+                candidates = [
+                    j for j in range(last_match_end, len(doc_lines) - k + 1)
+                    if [ln.strip() for ln in doc_lines[j : j + k]] == want_indent
+                ]
+                if candidates:
+                    best_j = min(candidates, key=lambda j: abs(j - target_idx))
+                    matched_span = (best_j, best_j + k)
+                    match_mode = "indent"
+
+        # Tier 4: Whitespace collapsed
+        if matched_span is None:
+            want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in old_lines]
+            if target_idx + k <= len(doc_lines) and [re.sub(r"[ \t]+", " ", ln.strip()) for ln in doc_lines[target_idx : target_idx + k]] == want_ws:
+                matched_span = (target_idx, target_idx + k)
+                match_mode = "whitespace"
+            else:
+                candidates = [
+                    j for j in range(last_match_end, len(doc_lines) - k + 1)
+                    if [re.sub(r"[ \t]+", " ", ln.strip()) for ln in doc_lines[j : j + k]] == want_ws
+                ]
+                if candidates:
+                    best_j = min(candidates, key=lambda j: abs(j - target_idx))
+                    matched_span = (best_j, best_j + k)
+                    match_mode = "whitespace"
+
+        # Tier 5: High similarity fuzzy match (>= 0.85)
+        if matched_span is None:
+            needle_str = "\n".join(_strip_symbols_and_emojis(ln) for ln in old_lines)
+            best_r = 0.0
+            best_cand = None
+            window_sizes = {max(1, k - 1), k, k + 1}
+            for w in window_sizes:
+                for j in range(last_match_end, len(doc_lines) - w + 1):
+                    cand_str = "\n".join(_strip_symbols_and_emojis(ln) for ln in doc_lines[j : j + w])
+                    sm = difflib.SequenceMatcher(None, needle_str, cand_str)
+                    if sm.quick_ratio() >= 0.80:
+                        r = sm.ratio()
+                        if r >= 0.85:
+                            score = (r, -abs(j - target_idx))
+                            if best_cand is None or score > (best_r, -abs(best_cand[0] - target_idx)):
+                                best_r = r
+                                best_cand = (j, j + w)
+            if best_cand is not None:
+                matched_span = best_cand
+                match_mode = "fuzzy"
+
+        if matched_span is None:
+            needle_text = "\n".join(old_lines)
+            diagnostic = _find_closest_match(clean_doc, needle_text)
+            raise OpError(
+                f"ERR|PATCH_FAILED|{target} - Hunk #{hunk_idx} at line {hunk.old_start} could not be matched.{diagnostic}"
+            )
+
+        start_idx, end_idx = matched_span
+        replacement = list(new_lines)
+        if match_mode == "indent" and old_lines and replacement:
+            doc_indent = _get_leading_indent(doc_lines[start_idx])
+            old_indent = _get_leading_indent(old_lines[0])
+            if doc_indent != old_indent:
+                adj = []
+                for ln in replacement:
+                    if not ln.strip():
+                        adj.append(ln)
+                    elif old_indent and ln.startswith(old_indent):
+                        adj.append(doc_indent + ln[len(old_indent):])
+                    else:
+                        adj.append(doc_indent + ln.lstrip(" \t"))
+                replacement = adj
+
+        doc_lines[start_idx : end_idx] = replacement
+        lines_removed = end_idx - start_idx
+        current_offset += len(replacement) - lines_removed
+        last_match_end = start_idx + len(replacement)
+
+    new_doc = "\n".join(doc_lines)
+    if doc.endswith("\n") and not new_doc.endswith("\n"):
+        new_doc += "\n"
+    from code_exec_fs import with_newlines
+    return with_newlines(new_doc, newline), len(hunks)

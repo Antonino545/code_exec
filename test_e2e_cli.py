@@ -119,6 +119,55 @@ class TestCodeExecCLI(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ERR|SEARCH_NOT_FOUND|index.js", result.stderr)
 
+    def test_e2e_hallucinated_unknown_command_rejection(self):
+        fence = chr(96) * 3
+        response = (
+            "Here is the update plan:\n\n"
+            f"{fence}code_exec\n"
+            "UPDATE config.ini\n"
+            "<<<\n"
+            "setting = 1\n"
+            ">>>\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ERR|UNKNOWN_COMMAND|UPDATE", result.stderr)
+        self.assertIn("Did you mean 'EDIT'?", result.stderr)
+
+    def test_e2e_hallucinated_bare_shell_command_rejection(self):
+        fence = chr(96) * 3
+        response = (
+            "Let's run the test command:\n\n"
+            f"{fence}code_exec\n"
+            "npm test\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ERR|UNKNOWN_COMMAND|npm", result.stderr)
+        self.assertIn("Shell commands must be prefixed with RUN", result.stderr)
+
+    def test_e2e_patch_execution(self):
+        target = self.root / "app.py"
+        target.write_text("def run():\n    return False\n", encoding="utf-8")
+        fence = chr(96) * 3
+        response = (
+            "Here is the patch:\n\n"
+            f"{fence}code_exec\n"
+            "PATCH app.py\n"
+            "<<<\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def run():\n"
+            "-    return False\n"
+            "+    return True\n"
+            ">>>\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertEqual(result.returncode, 0, msg=f"CLI failed: {result.stderr}")
+        self.assertEqual(target.read_text(encoding="utf-8"), "def run():\n    return True\n")
+
 
 if __name__ == "__main__":
     unittest.main()
