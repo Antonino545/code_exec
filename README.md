@@ -2,14 +2,14 @@
 
 A deterministic, atomic local code executor designed for AI coding workflows.
 
-Instead of dealing with whole-file rewrites or brittle unified diffs, `code-exec` processes surgical, token-tolerant instruction blocks straight from your clipboard or files. It previews changes with a modern terminal UI, verifies atomic rollbacks if anything fails, and scopes git commits directly to modified files.
+`code-exec` provides a practical solution to avoid manually copying and pasting multiple code snippets, file changes, and diffs from web chatboxes, without requiring expensive autonomous coding agent subscriptions or API tokens. You chat with whatever model or web interface you prefer, copy the generated plan block with a single click, and let `code-exec` validate, apply, and commit the changes atomically.
 
 ---
 
 ## Features
 
-- **Clipboard-First Workflow**: Copy an AI execution plan (`⌘C`) and apply it instantly in your project directory.
-- **Claude Code-Inspired TUI**: Responsive cards, status pills, diff counters, and clean typography.
+- **Clipboard-First Workflow**: Copy an AI execution plan (`Ctrl+C` / `⌘C`) and apply it instantly in your project directory.
+- **Cost-Effective & Autonomous-Free**: Get agentic execution locally without paying for expensive AI agent subscriptions or API credit burn.
 - **Interactive Launcher Menu**: Simply run `code-exec` to choose between applying, dry-running, copying the AI prompt, or viewing the guide.
 - **Atomic Operations & Rollback**: File operations are preflighted and backed up. If a validation step fails, all file modifications are safely rolled back.
 - **Tolerant Search & Replace**: Matches local anchors even with harmless indentation, quote variations, or emoji/unicode drift.
@@ -17,14 +17,11 @@ Instead of dealing with whole-file rewrites or brittle unified diffs, `code-exec
 
 ---
 
-## Global macOS Setup
+## Installation & Global Setup
 
-To use `code-exec` from any project folder in your terminal:
+### macOS
 
-### Option 1: Global Launcher Script (Recommended)
-
-Create a wrapper script in `/usr/local/bin`:
-
+#### Option 1: Global Launcher Script (Recommended)
 ```zsh
 sudo tee /usr/local/bin/code-exec << 'EOF'
 #!/usr/bin/env zsh
@@ -34,17 +31,56 @@ EOF
 sudo chmod +x /usr/local/bin/code-exec
 ```
 
-### Option 2: Zsh Alias
-
-Add the following to your `~/.zshrc`:
-
+#### Option 2: Zsh Alias
+Add to your `~/.zshrc`:
 ```zsh
 alias code-exec='python3 "/Users/antonino54/Documents/Project/Personal Project/code_exec/code_exec.py"'
 ```
+Then reload: `source ~/.zshrc`.
 
-Then reload your shell:
-```zsh
-source ~/.zshrc
+---
+
+### Ubuntu / Debian Linux
+
+1. Ensure clipboard support is installed for your display server:
+   ```bash
+   # For X11:
+   sudo apt install -y xclip
+   # Or for Wayland:
+   sudo apt install -y wl-clipboard
+   ```
+
+2. Create a global launcher script:
+   ```bash
+   sudo tee /usr/local/bin/code-exec << 'EOF'
+   #!/usr/bin/env bash
+   exec python3 "/path/to/code_exec/code_exec.py" "$@"
+   EOF
+
+   sudo chmod +x /usr/local/bin/code-exec
+   ```
+
+   *(Replace `/path/to/code_exec` with the absolute path to your cloned repository).*
+
+---
+
+### Windows
+
+#### Option 1: PowerShell Profile Function (Recommended)
+1. Open your PowerShell profile (`notepad $PROFILE`).
+2. Add the following function:
+   ```powershell
+   function code-exec {
+       python "C:\path\to\code_exec\code_exec.py" @args
+   }
+   ```
+3. Save the file and restart PowerShell or run `. $PROFILE`.
+
+#### Option 2: CMD / Batch Wrapper
+Create a file named `code-exec.bat` inside a folder that is in your system `PATH` (such as `C:\Windows` or a dedicated `C:\bin` directory):
+```cmd
+@echo off
+python "C:\path\to\code_exec\code_exec.py" %*
 ```
 
 ---
