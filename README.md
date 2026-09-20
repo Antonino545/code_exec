@@ -172,7 +172,7 @@ code-exec -p
 
 ## Supported Plan Commands
 
-Plans start with a `THINK` block explaining the change and contain one or more operations followed by an optional `COMMIT`:
+The AI can analyze and explain its reasoning in plain text outside the code block. Inside the code block, list the operations followed by an optional `COMMIT`:
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |

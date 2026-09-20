@@ -375,12 +375,70 @@ def describe_operation(op: Operation) -> str:
 # ============================================================
 # Main
 # ============================================================
+def _get_error_guidance(error_msg: str) -> str:
+    hints = []
+    if "ERR|SEARCH_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **SEARCH_NOT_FOUND**: The target SEARCH snippet does not exist in the file. "
+            "Inspect the 'Closest candidate' diff above: lines marked with '+' show the actual code currently in the file. "
+            "Update your SEARCH block to match those real lines verbatim."
+        )
+    if "ERR|SEARCH_AMBIGUOUS" in error_msg:
+        hints.append(
+            "- **SEARCH_AMBIGUOUS**: The SEARCH snippet matched multiple locations. "
+            "Include 1-3 lines of surrounding code before or after the target to form a unique local anchor."
+        )
+    if "ERR|SEARCH_TOO_BIG" in error_msg:
+        hints.append(
+            "- **SEARCH_TOO_BIG**: The SEARCH block is too large (max 60 lines / 4000 characters). "
+            "Shrink the SEARCH block to a 3-6 line unique local anchor rather than whole functions or components."
+        )
+    if "ERR|CREATE_EXISTS" in error_msg:
+        hints.append(
+            "- **CREATE_EXISTS**: The file already exists. "
+            "Use `EDIT <file>` or `REPLACE_ALL <file>` to modify existing files instead of CREATE."
+        )
+    if "ERR|FILE_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **FILE_NOT_FOUND**: The file to edit or insert into does not exist. "
+            "Verify the relative file path, or use `CREATE <file>` if you meant to create a new file."
+        )
+    if "ERR|CONFLICTING_OPERATIONS" in error_msg:
+        hints.append(
+            "- **CONFLICTING_OPERATIONS**: The plan contains contradictory operations on the same file. "
+            "Combine edits sequentially and never EDIT or APPEND after a DELETE."
+        )
+    if "ERR|MULTIPLE_PLANS" in error_msg:
+        hints.append(
+            "- **MULTIPLE_PLANS**: More than one plan block was detected. "
+            "Output exactly ONE single plan block in your response."
+        )
+    if "ERR|PLAN_NOT_FOUND" in error_msg:
+        hints.append(
+            "- **PLAN_NOT_FOUND**: No executable plan block was detected. "
+            "Ensure your plan starts with an executable code_exec block."
+        )
+    if "ERR|FORBIDDEN_COMMAND" in error_msg:
+        hints.append(
+            "- **FORBIDDEN_COMMAND**: The RUN command is forbidden or destructive. "
+            "Use standard test runners (e.g. pytest, python3 -m unittest, npm test, cargo test)."
+        )
+    if not hints:
+        hints.append("- Review the error details above and fix the problematic command or target block.")
+    return "\n".join(hints)
+
 
 def copy_error_to_clipboard(error_msg: str) -> None:
+    clean_err = error_msg.strip()
+    guidance = _get_error_guidance(clean_err)
+    fence = chr(96) * 3
     prompt = (
         "The previous `code_exec` plan failed with the following error:\n\n"
-        f"```\n{error_msg.strip()}\n```\n\n"
-        "Please analyze this error and output a single revised ```code_exec ... ``` block fixing the issue."
+        f"{fence}\n{clean_err}\n{fence}\n\n"
+        "### Troubleshooting Guidance:\n"
+        f"{guidance}\n\n"
+        "You may think and explain your analysis outside the code block. "
+        f"Then output a single revised {fence}code_exec ... {fence} block fixing the issue."
     )
     try:
         set_clipboard(prompt)

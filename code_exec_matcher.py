@@ -179,7 +179,6 @@ def _find_closest_match(doc: str, needle: str) -> str:
         start_line = best_start + 1
         end_line = best_end + 1
         pct = int(best_ratio * 100)
-
         diff = list(
             difflib.unified_diff(
                 needle_lines,
@@ -192,18 +191,18 @@ def _find_closest_match(doc: str, needle: str) -> str:
         diff_text = "\n".join(diff[:16])
         if len(diff) > 16:
             diff_text += f"\n... ({len(diff) - 16} more diff lines)"
-
         return (
             f"\n\nClosest candidate found at lines {start_line}-{end_line} ({pct}% similarity):\n"
             f"------------------------------------------------------------\n"
             f"{diff_text}\n"
-            f"------------------------------------------------------------"
+            f"------------------------------------------------------------\n"
+            f"(Note for LLM: Lines starting with '+' show actual file content. Update your SEARCH block to match.)"
         )
     return ""
 
 
-MAX_SEARCH_LINES = 18
-MAX_SEARCH_CHARS = 800
+MAX_SEARCH_LINES = 60
+MAX_SEARCH_CHARS = 4000
 
 
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
@@ -228,7 +227,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     if needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS:
         raise OpError(
             f"ERR|SEARCH_TOO_BIG|{target}|({needle_lines_count} lines, {needle_char_count} chars) - "
-            f"SEARCH block too large. Use a concise 3-6 line unique anchor instead of whole blocks or components."
+            f"SEARCH block exceeds maximum allowed limit ({MAX_SEARCH_LINES} lines, {MAX_SEARCH_CHARS} chars)."
         )
 
     # ---- Tier 1: Exact match ----

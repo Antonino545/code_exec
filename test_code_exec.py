@@ -36,6 +36,38 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertEqual(ops[0].args[0], "sample.txt")
         self.assertEqual(ops[0].data, "hello world")
 
+    def test_plan_without_think_block(self):
+        fence = chr(96) * 3
+        ai_response = (
+            f"Explanation outside.\n\n"
+            f"{fence}code_exec\n"
+            f"CREATE sample_no_think.txt\n"
+            f"<<<\n"
+            f"content without think block\n"
+            f">>>\n"
+            f"{fence}\n\n"
+            f"Done."
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "sample_no_think.txt")
+        self.assertEqual(ops[0].data, "content without think block")
+
+    def test_raw_plan_without_think_block(self):
+        raw_response = (
+            "CREATE sample_raw.txt\n"
+            "<<<\n"
+            "raw content\n"
+            ">>>\n"
+        )
+        plan = extract_plan(raw_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "sample_raw.txt")
+
     def test_markdown_with_unrelated_code_blocks(self):
         ai_response = (
             "# Code Update Summary\n\n"
@@ -295,10 +327,9 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
     def test_search_too_big_rejection(self):
         vfs = VirtualFS()
         test_file = ROOT / "test_big_search.txt"
-        vfs.write(test_file, "\n".join(f"line {i}" for i in range(50)) + "\n")
-
-        # Create oversized search block (>18 lines)
-        big_search = "\n".join(f"line {i}" for i in range(25)) + "\n"
+        vfs.write(test_file, "\n".join(f"line {i}" for i in range(100)) + "\n")
+        # Create oversized search block (>60 lines)
+        big_search = "\n".join(f"line {i}" for i in range(70)) + "\n"
         op = Operation(
             "EDIT",
             ("test_big_search.txt",),

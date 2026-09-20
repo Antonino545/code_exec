@@ -233,13 +233,14 @@ class TestResilienceAndSecurity(unittest.TestCase):
     def test_clipboard_error_feedback_integration(self):
         from unittest.mock import patch
         from code_exec import copy_error_to_clipboard
-
         with patch("code_exec.set_clipboard") as mock_set:
             copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|foo.py")
             mock_set.assert_called_once()
             clipboard_content = mock_set.call_args[0][0]
             self.assertIn("ERR|SEARCH_NOT_FOUND|foo.py", clipboard_content)
             self.assertIn("`code_exec` plan failed", clipboard_content)
+            self.assertIn("Troubleshooting Guidance", clipboard_content)
+            self.assertIn("SEARCH_NOT_FOUND", clipboard_content)
 
     def test_generate_commit_prompt(self):
         from unittest.mock import patch, MagicMock

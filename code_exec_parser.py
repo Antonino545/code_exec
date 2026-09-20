@@ -180,16 +180,18 @@ def extract_plan(text: str) -> str:
     cand_idx = 0
     while cand_idx < len(cand_lines) and cand_lines[cand_idx].strip().startswith("#"):
         cand_idx += 1
-
-    if cand_idx < len(cand_lines) and cand_lines[cand_idx].strip() == "THINK":
-        has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
-        has_command = any(
-            re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
-            for ln in cand_lines
-        )
-        if has_end_think and has_command:
+    if cand_idx < len(cand_lines):
+        first_word = cand_lines[cand_idx].strip().split()[0]
+        if first_word == "THINK":
+            has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
+            has_command = any(
+                re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
+                for ln in cand_lines
+            )
+            if has_end_think and has_command:
+                return candidate
+        elif first_word in COMMANDS:
             return candidate
-
     raise OpError("ERR|PLAN_NOT_FOUND")
 
 
@@ -277,9 +279,14 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
             raise ValueError(f"{command} requires 'source -> destination'")
         return Operation(command, (clean_path(pair[1]), clean_path(pair[2]))), i
 
-    path = clean_path(rest)
+    if command == "CHMOD":
+        parts = rest.rsplit(None, 1)
+        if len(parts) != 2:
+            raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
+        return Operation("CHMOD", (clean_path(parts[0]), parts[1].strip())), i
 
-    if command in {"DELETE", "MKDIR"}:
+    path = clean_path(rest)
+    if command in {"DELETE", "MKDIR", "TOUCH"}:
         return Operation(command, (path,)), i
 
     inline_block = False
@@ -293,12 +300,12 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         content, i = read_block(lines, i, inline_started=inline_block)
         return Operation(command, (path,), content), i
 
-    if command == "EDIT":
+    if command in {"EDIT", "REPLACE_ALL"}:
         i, search_inline = expect_keyword(lines, i, "SEARCH", command)
         search, i = read_block(lines, i, inline_started=search_inline)
         i, replace_inline = expect_keyword(lines, i, "REPLACE", command)
         replace, i = read_block(lines, i, inline_started=replace_inline)
-        return Operation("EDIT", (path,), search, replace), i
+        return Operation(command, (path,), search, replace), i
 
     # INSERT_BEFORE / INSERT_AFTER
     i, marker_inline = expect_keyword(lines, i, "MARKER", command)
