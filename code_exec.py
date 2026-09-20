@@ -43,7 +43,70 @@ ROOT = Path.cwd().resolve()
 # Path components that plans may never touch.
 PROTECTED_NAMES = {".git"}
 
+# Sensitive file basenames and patterns that plans may never modify or delete.
+PROTECTED_FILE_EXACT = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.staging",
+    ".env.test",
+    "id_rsa",
+    "id_ed25519",
+}
+
+PROTECTED_SUFFIXES = {
+    ".pem",
+    ".key",
+    ".crt",
+    ".cer",
+    ".pfx",
+    ".p12",
+}
+
 DEFAULT_RUN_TIMEOUT = 600  # seconds per RUN command; 0 disables the limit
+
+# Allowed executables and tools for RUN commands
+ALLOWED_RUN_COMMAND_PREFIXES = (
+    "python ",
+    "python3 ",
+    "pytest",
+    "unittest",
+    "npm test",
+    "npm run ",
+    "npm install",
+    "pnpm test",
+    "pnpm run ",
+    "yarn test",
+    "yarn run ",
+    "cargo test",
+    "cargo check",
+    "cargo build",
+    "go test",
+    "go build",
+    "ruff ",
+    "black ",
+    "flake8",
+    "mypy",
+    "git status",
+    "git diff",
+)
+
+# High-risk patterns forbidden in RUN commands even if prefix matches
+FORBIDDEN_RUN_SUBSTRINGS = (
+    "rm -rf",
+    "rm -fr",
+    "sudo",
+    "mkfs",
+    "dd if=",
+    ":(){ :|:& };:",
+    "> /dev/sd",
+    "curl ",
+    "wget ",
+    "| sh",
+    "| bash",
+    "chmod 777",
+    "chown -R",
+)
 
 
 # ============================================================
@@ -105,6 +168,16 @@ def safe_path(value: str, *, follow_leaf: bool = True) -> Path:
 
     if any(part.lower() in PROTECTED_NAMES for part in relative.parts):
         raise OpError(f"ERR|PROTECTED_PATH|{value} - Refusing to touch protected path: {value}")
+
+    # Guard sensitive and secret files
+    file_name = resolved.name.lower()
+    if file_name in PROTECTED_FILE_EXACT or any(file_name.endswith(ext) for ext in PROTECTED_SUFFIXES):
+        raise OpError(f"ERR|FILE_PROTECTED|{value} - Refusing to touch sensitive credential/key file")
+
+    # Guard CI/CD workflows
+    rel_posix = relative.as_posix().lower()
+    if rel_posix.startswith(".github/workflows/") or rel_posix == ".gitlab-ci.yml":
+        raise OpError(f"ERR|FILE_PROTECTED|{value} - Refusing to touch CI/CD workflow definition")
 
     return resolved
 
@@ -1023,6 +1096,7 @@ class RealFS:
             raise OpError(f"Cannot copy {rel(src)}: {exc}") from None
 
     def run(self, command: str):
+        validate_run_command(command)
         ui.command(command)
         self.ran_commands.append(command)
         limit = self.timeout or None
@@ -1036,6 +1110,7 @@ class RealFS:
             raise CommandFailed(
                 f"Command failed (exit {result.returncode}): {command}"
             )
+
 
     def rollback(self) -> list[str]:
         errors = []
@@ -1060,6 +1135,35 @@ class RealFS:
                 errors.append(f"{kind} {rel(path)}: {exc}")
         self.journal.clear()
         return errors
+
+    def cleanup(self):
+        if self.backup_dir is not None:
+            shutil.rmtree(self.backup_dir, ignore_errors=True)
+            self.backup_dir = None
+
+
+def validate_run_command(cmd: str) -> None:
+    trimmed = cmd.strip()
+    if not trimmed:
+        raise OpError("ERR|FORBIDDEN_COMMAND|empty command")
+
+    cmd_lower = trimmed.lower()
+
+    # Block destructive/network substrings
+    for forbidden in FORBIDDEN_RUN_SUBSTRINGS:
+        if forbidden in cmd_lower:
+            raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - contains forbidden pattern '{forbidden}'")
+
+    # Verify command starts with an allowed prefix
+    matches_allowed = any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES)
+    if not matches_allowed:
+        allowed_list = ", ".join(f"'{p.strip()}'" for p in ALLOWED_RUN_COMMAND_PREFIXES[:7]) + ", ..."
+        raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - command not in whitelist (allowed: {allowed_list})")
+
+    def cleanup(self):
+        if self.backup_dir is not None:
+            shutil.rmtree(self.backup_dir, ignore_errors=True)
+            self.backup_dir = None
 
     def cleanup(self):
         if self.backup_dir is not None:
@@ -1194,6 +1298,9 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
 
     for number, op in enumerate(operations, 1):
         try:
+            if op.command == "RUN":
+                validate_run_command(op.args[0])
+
             if reason is not None:
                 check_paths(op)
             elif op.command == "RUN":

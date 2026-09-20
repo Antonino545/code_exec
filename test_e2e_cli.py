@@ -41,7 +41,7 @@ class TestCodeExecCLI(unittest.TestCase):
             "THINK\n"
             "Create settings file\n"
             "END_THINK\n"
-            "CREATE settings.env\n"
+            "CREATE settings.conf\n"
             "<<<\n"
             "ENVIRONMENT=production\n"
             "PORT=8080\n"
@@ -51,7 +51,7 @@ class TestCodeExecCLI(unittest.TestCase):
         )
         result = self.run_cli(response)
         self.assertEqual(result.returncode, 0, msg=f"Process failed: {result.stderr}")
-        created = self.root / "settings.env"
+        created = self.root / "settings.conf"
         self.assertTrue(created.is_file())
         self.assertEqual(created.read_text(encoding="utf-8"), "ENVIRONMENT=production\nPORT=8080\n")
 
