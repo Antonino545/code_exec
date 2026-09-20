@@ -256,6 +256,26 @@ class TestResilienceAndSecurity(unittest.TestCase):
             self.assertIn("untracked_file.txt", prompt)
             self.assertIn("COMMIT type(scope):", prompt)
 
+    def test_perform_git_commit_standalone_success(self):
+        from unittest.mock import patch, MagicMock
+        from code_exec import perform_git_commit
+        status_mock = MagicMock(stdout=" M file.py\n")
+        cached_mock = MagicMock(stdout="file.py\n")
+        commit_mock = MagicMock(stdout="[main abc1234] feat: standalone\n")
+        with patch("subprocess.run", side_effect=[status_mock, MagicMock(), cached_mock, commit_mock]):
+            success, msg = perform_git_commit("feat: standalone", [])
+            self.assertTrue(success)
+            self.assertIn("feat: standalone", msg)
+
+    def test_perform_git_commit_standalone_clean(self):
+        from unittest.mock import patch, MagicMock
+        from code_exec import perform_git_commit
+        status_mock = MagicMock(stdout="")
+        with patch("subprocess.run", return_value=status_mock):
+            success, msg = perform_git_commit("feat: standalone", [])
+            self.assertFalse(success)
+            self.assertIn("No changes detected in git repository to commit", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

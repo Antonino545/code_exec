@@ -501,18 +501,34 @@ def generate_commit_prompt() -> str:
 
 
 def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
-    if not paths:
-        return False, "No modified files to commit."
     try:
-        subprocess.run(["git", "add", "--", *paths], cwd=ROOT, check=True)
+        if not paths:
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            if not status_res.stdout.strip():
+                return False, "No changes detected in git repository to commit."
+            subprocess.run(["git", "add", "-A"], cwd=ROOT, check=True)
+            diff_cached = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            if not diff_cached.stdout.strip():
+                return False, "No staged changes detected in repository."
+            res = subprocess.run(
+                ["git", "commit", "-m", message],
+                cwd=ROOT, capture_output=True, text=True, check=True
+            )
+            return True, res.stdout.strip()
 
+        subprocess.run(["git", "add", "--", *paths], cwd=ROOT, check=True)
         diff_cached = subprocess.run(
             ["git", "diff", "--cached", "--name-only", "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
         )
         if not diff_cached.stdout.strip():
             return False, "No staged changes detected for modified files."
-
         res = subprocess.run(
             ["git", "commit", "-m", message, "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
@@ -580,7 +596,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
     ui.done(has_git=has_git)
 
     if has_git and commit_msg and not no_commit:
-        should_commit = auto_commit or ui.prompt_commit(commit_msg)
+        should_commit = auto_commit or (not exec_ops) or ui.prompt_commit(commit_msg)
         if should_commit:
             unique_paths = list(dict.fromkeys(modified_paths))
             success, out = perform_git_commit(commit_msg, unique_paths)
