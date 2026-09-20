@@ -2,6 +2,7 @@
 import sys
 import unittest
 from code_exec import (
+    ROOT,
     OpError,
     Operation,
     VirtualFS,
@@ -272,6 +273,21 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         with self.assertRaises(OpError) as ctx:
             execute(op, vfs)
         self.assertIn("ERR|DELETE_NOT_FOUND|does_not_exist.txt", str(ctx.exception))
+
+    def test_fuzzy_search_fallback_above_90_percent(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_fuzzy.txt"
+        vfs.write(test_file, "line 1\nline 2: temperature = 20.0°\nline 3\n")
+
+        # Search missing the degree symbol '°' (96% similarity)
+        op = Operation(
+            "EDIT",
+            ("test_fuzzy.txt",),
+            "line 2: temperature = 20.0 \n",
+            "line 2: temperature = 22.0°\n",
+        )
+        execute(op, vfs)
+        self.assertIn("line 2: temperature = 22.0°", vfs.read(test_file))
 
     def test_sandboxed_command_builder(self):
         from code_exec import build_sandboxed_command
