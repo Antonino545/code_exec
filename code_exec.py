@@ -525,6 +525,34 @@ def get_clipboard() -> str:
     )
 
 
+def set_clipboard(text: str) -> None:
+    if sys.platform == "darwin":
+        commands = [["pbcopy"]]
+    elif sys.platform.startswith("linux"):
+        commands = [
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+        ]
+    elif sys.platform == "win32":
+        commands = [[
+            "powershell", "-NoProfile", "-Command",
+            "[Console]::InputEncoding = [Text.Encoding]::UTF8; Set-Clipboard",
+        ]]
+    else:
+        commands = []
+
+    for command in commands:
+        try:
+            subprocess.run(command, input=text.encode("utf-8"), check=True, timeout=10)
+            return
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+    tried = ", ".join(c[0] for c in commands) or "no clipboard tool for this platform"
+    raise RuntimeError(f"Could not copy to clipboard (tried: {tried}).")
+
+
 # ============================================================
 # Operation
 # ============================================================
@@ -544,6 +572,7 @@ class Operation:
 COMMANDS = {
     "CREATE", "EDIT", "DELETE", "MOVE", "COPY", "RENAME", "MKDIR",
     "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "RUN",
+    "COMMIT",
 }
 
 
@@ -556,7 +585,15 @@ def read_block(lines: list[str], i: int) -> tuple[str, int]:
     if j < len(lines) and lines[j].strip() == "<<<":
         start = j + 1
         k = start
-        while k < len(lines) and lines[k].strip() != ">>>":
+        depth = 1
+        while k < len(lines):
+            line_str = lines[k].strip()
+            if line_str == "<<<":
+                depth += 1
+            elif line_str == ">>>":
+                depth -= 1
+                if depth == 0:
+                    break
             k += 1
         if k >= len(lines):
             raise ValueError(f"Missing >>> for block opened at line {j + 1}")
@@ -592,8 +629,8 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     if not rest:
         raise ValueError(f"{command} requires an argument")
 
-    if command == "RUN":
-        return Operation("RUN", (rest,)), i
+    if command in {"RUN", "COMMIT"}:
+        return Operation(command, (rest,)), i
 
     if command in {"MOVE", "COPY", "RENAME"}:
         pair = re.match(r"^(.+?)\s*->\s*(.+)$", rest)
@@ -993,11 +1030,14 @@ def execute(op: Operation, fs) -> str | None:
         fs.run(args[0])
         return None
 
+    if command == "COMMIT":
+        return None
+
     raise OpError(f"Unsupported command: {command}")
 
 
 def check_paths(op: Operation) -> None:
-    if op.command == "RUN":
+    if op.command in {"RUN", "COMMIT"}:
         return
     for value in op.args:
         safe_path(value, follow_leaf=False)
@@ -1060,7 +1100,29 @@ def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def apply_plan(operations: list[Operation], timeout: int) -> int:
+def perform_git_commit(message: str) -> tuple[bool, str]:
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ROOT, capture_output=True, text=True, check=True
+        )
+        if not status.stdout.strip():
+            return False, "No changes detected to commit."
+
+        subprocess.run(["git", "add", "-A"], cwd=ROOT, check=True)
+        res = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=ROOT, capture_output=True, text=True, check=True
+        )
+        return True, res.stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.strip() if exc.stderr else (exc.stdout.strip() if exc.stdout else str(exc))
+        return False, err
+    except OSError as exc:
+        return False, str(exc)
+
+
+def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False) -> int:
     fs = RealFS(timeout)
 
     if hasattr(signal, "SIGTERM"):
@@ -1069,18 +1131,26 @@ def apply_plan(operations: list[Operation], timeout: int) -> int:
         except (ValueError, OSError):
             pass
 
-    ui.start_apply(len(operations))
+    exec_ops = [op for op in operations if op.command != "COMMIT"]
+    commit_op = next((op for op in operations if op.command == "COMMIT"), None)
+    commit_msg = commit_op.args[0] if commit_op else None
+
+    ui.start_apply(len(exec_ops))
 
     try:
-        for number, op in enumerate(operations, 1):
+        step = 0
+        for op in operations:
+            if op.command == "COMMIT":
+                continue
+            step += 1
             try:
                 message = execute(op, fs)
             except OpError as exc:
                 raise type(exc)(
-                    f"Operation {number} ({describe_operation(op)}): {exc}"
+                    f"Operation {step} ({describe_operation(op)}): {exc}"
                 ) from None
             if message:
-                ui.step_done(number, len(operations), message)
+                ui.step_done(step, len(exec_ops), message)
 
     except CommandFailed as exc:
         ui.command_failed(str(exc), fs.backup_dir)
@@ -1096,7 +1166,18 @@ def apply_plan(operations: list[Operation], timeout: int) -> int:
         return 1
 
     fs.cleanup()
-    ui.done(has_git=(ROOT / ".git").exists())
+    has_git = (ROOT / ".git").exists()
+    ui.done(has_git=has_git)
+
+    if has_git and commit_msg and not no_commit:
+        should_commit = auto_commit or ui.prompt_commit(commit_msg)
+        if should_commit:
+            success, out = perform_git_commit(commit_msg)
+            if success:
+                ui.commit_success(out, commit_msg)
+            else:
+                ui.commit_failed(out)
+
     return 0
 
 
@@ -1107,7 +1188,11 @@ def main(argv=None) -> int:
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(description="Deterministic local code executor")
+    parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true",
+                        help="Show interactive usage guide and options")
+    parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
+                        help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--clipboard", action="store_true",
                         help="Read instructions from clipboard (the default)")
     parser.add_argument("--file", help="Read instructions from a file ('-' for stdin)")
@@ -1117,10 +1202,28 @@ def main(argv=None) -> int:
                         help="Apply without confirmation")
     parser.add_argument("--no-run", action="store_true",
                         help="Refuse plans that contain RUN commands")
+    parser.add_argument("--no-commit", action="store_true",
+                        help="Skip git commit prompt even if COMMIT is present")
     parser.add_argument("--timeout", type=int, default=DEFAULT_RUN_TIMEOUT,
                         help=f"Seconds allowed per RUN command, 0 = no limit "
                              f"(default {DEFAULT_RUN_TIMEOUT})")
     args = parser.parse_args(argv)
+
+    if args.help:
+        ui.show_guide()
+        return 0
+
+    if args.prompt:
+        instructions_path = Path(__file__).resolve().parent / "code_exec_instructions.md"
+        if not instructions_path.is_file():
+            return fail(f"Instructions file not found: {instructions_path.name} (checked {instructions_path.parent})")
+        try:
+            content = instructions_path.read_text(encoding="utf-8")
+            set_clipboard(content)
+        except Exception as exc:
+            return fail(f"Could not copy instructions: {exc}")
+        ui.instructions_copied(instructions_path)
+        return 0
 
     if args.timeout < 0:
         parser.error("--timeout must be >= 0")
@@ -1134,7 +1237,9 @@ def main(argv=None) -> int:
         return fail(f"Cannot read instructions: {exc}")
 
     if not text.strip():
-        return fail("Instructions are empty")
+        ui.show_guide()
+        print("  💡 Tip: Copy a code_exec plan block to your clipboard first, or use --file <path>.\n")
+        return 0
 
     try:
         operations = parse_operations(text)
@@ -1164,7 +1269,7 @@ def main(argv=None) -> int:
             ui.cancelled()
             return 0
 
-    return apply_plan(operations, args.timeout)
+    return apply_plan(operations, args.timeout, no_commit=args.no_commit, auto_commit=args.yes)
 
 
 if __name__ == "__main__":

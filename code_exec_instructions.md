@@ -322,6 +322,16 @@ RUN commands are **not rolled back**, so put them after file modifications whene
 
 ---
 
+# COMMIT
+
+Plans modifying project files should end with a `COMMIT` command providing a concise, Conventional Commits-style message describing the change (e.g. `feat: ...`, `fix: ...`, `refactor: ...`):
+
+COMMIT feat(auth): add token validation middleware
+
+After successfully applying file changes, `code_exec` will ask the user if they want to create a git commit using this message.
+
+---
+
 # Safety
 
 Paths must be relative to the project root.
