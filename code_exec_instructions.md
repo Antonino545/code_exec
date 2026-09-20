@@ -54,6 +54,7 @@ Meaningful code (attributes, values, strings, comments, operators, component nam
 - `ERR|MULTIPLE_PLANS|<count>` — Multiple plan blocks found (ambiguous).
 - `ERR|SEARCH_NOT_FOUND|<file>` — SEARCH target could not be found (diff diagnostics included).
 - `ERR|SEARCH_AMBIGUOUS|<file>|<count>` — SEARCH matched multiple locations; add more context.
+- `ERR|SEARCH_TOO_BIG|<file>` — SEARCH block exceeds 18 lines or 800 characters; shrink anchor to 3–6 lines.
 - `ERR|CREATE_EXISTS|<file>` — File already exists.
 - `ERR|DELETE_NOT_FOUND|<file>` — File to delete does not exist.
 - `ERR|FILE_NOT_FOUND|<file>` — File to edit/insert does not exist.
