@@ -548,7 +548,9 @@ class TerminalUI:
 
         # Contextual recommendation banner
         hint = ""
-        if "ERR|SEARCH_NOT_FOUND" in message:
+        if "ERR|SEARCH_TOO_BIG" in message:
+            hint = "Tip: SEARCH block is too large. Shrink your SEARCH anchor to 3-6 unique lines around the edit."
+        elif "ERR|SEARCH_NOT_FOUND" in message:
             hint = "Tip: SEARCH block didn't match. Compare against the diff above and add unique lines."
         elif "ERR|SEARCH_AMBIGUOUS" in message:
             hint = "Tip: SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."

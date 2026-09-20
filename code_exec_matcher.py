@@ -193,6 +193,10 @@ def _find_closest_match(doc: str, needle: str) -> str:
     return ""
 
 
+MAX_SEARCH_LINES = 18
+MAX_SEARCH_CHARS = 800
+
+
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness:
@@ -208,6 +212,15 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         raise OpError(f"{what} block is empty")
 
     err_prefix = "SEARCH" if what == "SEARCH" else what
+
+    # Guard against oversized search blocks in large files
+    needle_lines_count = len(needle.split("\n"))
+    needle_char_count = len(needle)
+    if needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS:
+        raise OpError(
+            f"ERR|SEARCH_TOO_BIG|{target}|({needle_lines_count} lines, {needle_char_count} chars) - "
+            f"SEARCH block too large. Use a concise 3-6 line unique anchor instead of whole blocks or components."
+        )
 
     # ---- Tier 1: Exact match ----
     count = doc.count(needle)

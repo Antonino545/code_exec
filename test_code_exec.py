@@ -287,6 +287,23 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             self.assertEqual(meta["message"], "feat: test commit")
             self.assertEqual(meta["author"], "Antonino")
 
+    def test_search_too_big_rejection(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_big_search.txt"
+        vfs.write(test_file, "\n".join(f"line {i}" for i in range(50)) + "\n")
+
+        # Create oversized search block (>18 lines)
+        big_search = "\n".join(f"line {i}" for i in range(25)) + "\n"
+        op = Operation(
+            "EDIT",
+            ("test_big_search.txt",),
+            big_search,
+            "replaced\n",
+        )
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|SEARCH_TOO_BIG", str(ctx.exception))
+
     def test_fuzzy_search_fallback_above_90_percent(self):
         vfs = VirtualFS()
         test_file = ROOT / "test_fuzzy.txt"
