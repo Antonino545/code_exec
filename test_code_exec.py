@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 import unittest
 from code_exec import (
     OpError,
@@ -271,6 +272,34 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         with self.assertRaises(OpError) as ctx:
             execute(op, vfs)
         self.assertIn("ERR|DELETE_NOT_FOUND|does_not_exist.txt", str(ctx.exception))
+
+    def test_sandboxed_command_builder(self):
+        from code_exec import build_sandboxed_command
+
+        # Whitelisted commands need no wrapping
+        cmd, env = build_sandboxed_command("pytest tests/", False)
+        self.assertEqual(cmd, "pytest tests/")
+        self.assertIsNone(env)
+
+        # Unvetted commands trigger platform sandboxing
+        orig_platform = sys.platform
+        try:
+            sys.platform = "win32"
+            w_cmd, w_env = build_sandboxed_command("python3 script.py", True)
+            self.assertIn("powershell.exe", w_cmd)
+            self.assertIn("-ExecutionPolicy Restricted", w_cmd)
+            self.assertIsNotNone(w_env)
+            self.assertEqual(w_env.get("HTTP_PROXY"), "http://127.0.0.1:0")
+
+            sys.platform = "darwin"
+            m_cmd, m_env = build_sandboxed_command("python3 script.py", True)
+            self.assertIn("sandbox-exec", m_cmd)
+
+            sys.platform = "linux"
+            l_cmd, l_env = build_sandboxed_command("python3 script.py", True)
+            self.assertIn("unshare -r -n", l_cmd)
+        finally:
+            sys.platform = orig_platform
 
     def test_conflicting_operations_detection(self):
         from code_exec import preflight

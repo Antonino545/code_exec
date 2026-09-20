@@ -1115,18 +1115,16 @@ class RealFS:
             if ans not in {"y", "yes"}:
                 raise CommandFailed(f"User denied execution of: {command}")
 
-        actual_cmd = command
-        # Basic sandboxing (network drop) for unvetted generic commands
-        if needs_prompt:
-            if sys.platform.startswith("linux"):
-                actual_cmd = f"unshare -r -n {command}"
-            elif sys.platform == "darwin":
-                actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' {command}"
+        actual_cmd, extra_env = build_sandboxed_command(command, needs_prompt)
 
         self.ran_commands.append(actual_cmd)
         limit = self.timeout or None
+        run_env = os.environ.copy()
+        if extra_env:
+            run_env.update(extra_env)
+
         try:
-            result = subprocess.run(actual_cmd, shell=True, cwd=ROOT, timeout=limit)
+            result = subprocess.run(actual_cmd, shell=True, cwd=ROOT, timeout=limit, env=run_env)
         except subprocess.TimeoutExpired:
             raise CommandFailed(
                 f"Command timed out after {self.timeout}s: {actual_cmd}"
@@ -1165,6 +1163,56 @@ class RealFS:
         if self.backup_dir is not None:
             shutil.rmtree(self.backup_dir, ignore_errors=True)
             self.backup_dir = None
+
+
+def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict[str, str] | None]:
+    """Wraps unvetted generic commands in OS-level sandboxing (dropping network where supported)."""
+    if not needs_prompt:
+        return command, None
+
+    extra_env = None
+    actual_cmd = command
+
+    if sys.platform.startswith("linux"):
+        actual_cmd = f"unshare -r -n {command}"
+    elif sys.platform == "darwin":
+        actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' {command}"
+    elif sys.platform == "win32":
+        extra_env = {
+            "HTTP_PROXY": "http://127.0.0.1:0",
+            "HTTPS_PROXY": "http://127.0.0.1:0",
+            "ALL_PROXY": "http://127.0.0.1:0",
+            "NO_PROXY": "",
+        }
+        escaped_cmd = command.replace('"', '""')
+        actual_cmd = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command "{escaped_cmd}"'
+
+    return actual_cmd, extra_env
+
+
+def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict[str, str] | None]:
+    """Wraps unvetted generic commands in OS-level sandboxing (dropping network where supported)."""
+    if not needs_prompt:
+        return command, None
+
+    extra_env = None
+    actual_cmd = command
+
+    if sys.platform.startswith("linux"):
+        actual_cmd = f"unshare -r -n {command}"
+    elif sys.platform == "darwin":
+        actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' {command}"
+    elif sys.platform == "win32":
+        extra_env = {
+            "HTTP_PROXY": "http://127.0.0.1:0",
+            "HTTPS_PROXY": "http://127.0.0.1:0",
+            "ALL_PROXY": "http://127.0.0.1:0",
+            "NO_PROXY": "",
+        }
+        escaped_cmd = command.replace('"', '""')
+        actual_cmd = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command "{escaped_cmd}"'
+
+    return actual_cmd, extra_env
 
 
 def validate_run_command(cmd: str) -> bool:
