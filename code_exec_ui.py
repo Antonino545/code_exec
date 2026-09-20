@@ -48,36 +48,6 @@ class TerminalPalette:
             "WHITE": "\033[38;2;192;202;245m",
         },
     }
-class TerminalPalette:
-    THEMES = {
-        "claude": {
-            "CORAL": "\033[38;2;217;119;87m",
-            "AMBER": "\033[38;2;230;149;94m",
-            "GREEN": "\033[38;2;120;169;137m",
-            "CYAN":  "\033[38;2;110;175;210m",
-            "SLATE": "\033[38;2;135;140;148m",
-            "RED":   "\033[38;2;225;98;89m",
-            "WHITE": "\033[38;2;240;240;240m",
-        },
-        "catppuccin": {
-            "CORAL": "\033[38;2;203;166;247m",
-            "AMBER": "\033[38;2;250;179;135m",
-            "GREEN": "\033[38;2;166;227;161m",
-            "CYAN":  "\033[38;2;137;180;250m",
-            "SLATE": "\033[38;2;108;112;134m",
-            "RED":   "\033[38;2;243;139;168m",
-            "WHITE": "\033[38;2;205;214;244m",
-        },
-        "tokyo-night": {
-            "CORAL": "\033[38;2;187;154;247m",
-            "AMBER": "\033[38;2;255;158;100m",
-            "GREEN": "\033[38;2;158;206;106m",
-            "CYAN":  "\033[38;2;122;162;247m",
-            "SLATE": "\033[38;2;86;95;137m",
-            "RED":   "\033[38;2;247;118;142m",
-            "WHITE": "\033[38;2;192;202;245m",
-        },
-    }
 
     def __init__(self):
         self.themes = self.THEMES
@@ -503,6 +473,10 @@ class TerminalUI:
             print(f"│ {msg2}{' ' * pad2} │")
 
         print(f"╰{'─' * (w - 2)}╯\n")
+
+    def warn(self, message: str) -> None:
+        c = self.palette
+        print(c.paint(f"  ▲ {message}", c.AMBER, bold=True))
 
     def error(self, message: str) -> None:
         c = self.palette
