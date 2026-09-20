@@ -28,6 +28,22 @@ COMMAND_ALIASES = {
     "EXECUTE": "RUN",
 }
 
+# --------------------------------------------------------------------------- #
+# Block delimiters
+#
+# The canonical form is  `<<<` ... `>>>`, but chats and markdown renderers often
+# eat or shorten them (`<`, `<<`, `>>`), so the parser accepts any run of 1-5
+# angle brackets as an *opener* and 2-5 as a *closer* (falling back to a single
+# `>` only when nothing else closes the block). Nesting is still tracked with
+# the canonical `<<<` so content that itself contains `<<<` ... `>>>` works.
+# --------------------------------------------------------------------------- #
+_OPEN_LINE = re.compile(r"^<{1,5}$")          # opener on its own line
+_OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,5}$")  # opener at the end of a command line
+_NEST_OPEN = re.compile(r"^<{3,5}$")          # nested block inside content
+_CLOSE_STRICT = re.compile(r"^>{2,5}$")
+_CLOSE_LOOSE = re.compile(r"^>{1,5}$")
+_ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
+
 
 def get_clipboard() -> str:
     env = None
@@ -90,6 +106,11 @@ def set_clipboard(text: str) -> None:
     raise RuntimeError(f"Could not copy to clipboard (tried: {tried}).")
 
 
+def _is_code_exec_fence(info: str) -> bool:
+    """Accept `code_exec`, `code-exec`, `code exec`, `CODE_EXEC`, `code_exec plan`, `code_exec:` ..."""
+    return re.sub(r"[^a-z]", "", info.lower()).startswith("codeexec")
+
+
 def extract_plan(text: str) -> str:
     """
     Extract the executable code_exec plan block from an AI response.
@@ -107,12 +128,12 @@ def extract_plan(text: str) -> str:
         stripped = line.strip()
 
         # Format 2: CODE_EXEC_PLAN ... END_CODE_EXEC_PLAN
-        if stripped == "CODE_EXEC_PLAN":
+        if stripped.upper().replace(" ", "_") == "CODE_EXEC_PLAN":
             i += 1
             block_lines = []
             found_end = False
             while i < len(lines):
-                if lines[i].strip() == "END_CODE_EXEC_PLAN":
+                if lines[i].strip().upper().replace(" ", "_") == "END_CODE_EXEC_PLAN":
                     found_end = True
                     i += 1
                     break
@@ -130,14 +151,7 @@ def extract_plan(text: str) -> str:
             fence_chars = fence_match.group(1)
             fence_char = fence_chars[0]
             fence_len = len(fence_chars)
-            info = fence_match.group(2).strip().lower()
-
-            is_code_exec = (
-                info == "code_exec"
-                or info == "code-exec"
-                or info.startswith("code_exec ")
-                or info.startswith("code_exec:")
-            )
+            is_code_exec = _is_code_exec_fence(fence_match.group(2).strip())
 
             i += 1
             block_lines = []
@@ -149,9 +163,9 @@ def extract_plan(text: str) -> str:
                 curr_stripped = curr.strip()
 
                 if is_code_exec:
-                    if curr_stripped == "<<<":
+                    if _NEST_OPEN.match(curr_stripped):
                         content_depth += 1
-                    elif curr_stripped == ">>>":
+                    elif _CLOSE_STRICT.match(curr_stripped):
                         if content_depth > 0:
                             content_depth -= 1
 
@@ -188,7 +202,7 @@ def extract_plan(text: str) -> str:
     if len(plans) > 1:
         raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans)}")
 
-    # Format 3: Backward compatibility for legacy response starting with THINK
+    # Format 3: bare plan (no fence) - starts directly with a command, or a legacy THINK block
     trimmed = sanitized.strip()
     candidate = trimmed
 
@@ -201,7 +215,7 @@ def extract_plan(text: str) -> str:
     while cand_idx < len(cand_lines) and cand_lines[cand_idx].strip().startswith("#"):
         cand_idx += 1
     if cand_idx < len(cand_lines):
-        first_word = cand_lines[cand_idx].strip().split()[0]
+        first_word = cand_lines[cand_idx].strip().split()[0].rstrip(":")
         if first_word == "THINK":
             has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
             has_command = any(
@@ -210,49 +224,45 @@ def extract_plan(text: str) -> str:
             )
             if has_end_think and has_command:
                 return candidate
-        elif first_word in COMMANDS:
+        elif first_word in COMMANDS or first_word in COMMAND_ALIASES:
             return candidate
     raise OpError("ERR|PLAN_NOT_FOUND")
 
 
-def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[str, int]:
-    """Read a `<<< ... >>>` block or raw lines up to END_OF_FILE."""
-    j = i
-    if inline_started:
-        start = j
-        k = start
-        depth = 1
-        while k < len(lines):
-            line_str = lines[k].strip()
-            if line_str == "<<<":
-                depth += 1
-            elif line_str == ">>>":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        if k >= len(lines):
-            raise ValueError("Missing >>> for block opened with <<<")
-        return "\n".join(lines[start:k]), k + 1
+def _find_close(lines: list[str], start: int, closer: re.Pattern[str]) -> int:
+    """Index of the line that closes a block whose content begins at `start`, or -1."""
+    depth = 1
+    for k in range(start, len(lines)):
+        line_str = lines[k].strip()
+        if _NEST_OPEN.match(line_str):
+            depth += 1
+        elif closer.match(line_str):
+            depth -= 1
+            if depth == 0:
+                return k
+    return -1
 
+
+def _read_delimited(lines: list[str], start: int) -> tuple[str, int]:
+    """Read block content beginning at `start` (the opener line is already consumed)."""
+    k = _find_close(lines, start, _CLOSE_STRICT)
+    if k < 0:
+        k = _find_close(lines, start, _CLOSE_LOOSE)  # tolerate a lone `>` closer
+    if k < 0:
+        raise ValueError(f"Missing >>> for block opened at line {start}")
+    return "\n".join(lines[start:k]), k + 1
+
+
+def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[str, int]:
+    """Read a `<<< ... >>>` block (any `<`/`>` run) or raw lines up to END_OF_FILE."""
+    if inline_started:
+        return _read_delimited(lines, i)
+
+    j = i
     while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
         j += 1
-    if j < len(lines) and lines[j].strip().startswith("<<<"):
-        start = j + 1
-        k = start
-        depth = 1
-        while k < len(lines):
-            line_str = lines[k].strip()
-            if line_str == "<<<":
-                depth += 1
-            elif line_str == ">>>":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        if k >= len(lines):
-            raise ValueError(f"Missing >>> for block opened at line {j + 1}")
-        return "\n".join(lines[start:k]), k + 1
+    if j < len(lines) and _OPEN_LINE.match(lines[j].strip()):
+        return _read_delimited(lines, j + 1)
 
     k = i
     while k < len(lines) and lines[k].strip() != "END_OF_FILE":
@@ -263,46 +273,73 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
 
 
 def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tuple[int, bool]:
+    """
+    Accept `SEARCH`, `SEARCH <<<`, `SEARCH <`, `search:`, `Search: <<<` ... (case-insensitive).
+    Returns (next line index, whether the block opener was on the keyword line).
+    """
     while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("#")):
         i += 1
     if i >= len(lines):
-        raise ValueError(f"{command} requires {keyword} (line {i + 1})")
+        raise ValueError(f"{command} requires {keyword} <<< ... >>> (plan ended before it)")
     line = lines[i].strip()
-    if line == keyword:
-        return i + 1, False
-    if line.startswith(keyword) and line[len(keyword):].strip() == "<<<":
-        return i + 1, True
-    raise ValueError(f"{command} requires {keyword} (line {i + 1})")
+    m = re.match(rf"^{keyword}\s*:?\s*(<{{1,5}})?\s*$", line, re.IGNORECASE)
+    if m:
+        return i + 1, bool(m.group(1))
+    raise ValueError(
+        f"{command} requires {keyword} <<< ... >>> (line {i + 1}, found {line[:40]!r})"
+    )
+
+
+def _unwrap(text: str) -> str:
+    """Drop a leading `$ ` prompt and wrapping quotes/backticks around a one-line argument."""
+    text = text.strip()
+    if text.startswith("$ "):
+        text = text[2:].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+        text = text[1:-1].strip()
+    return text
+
+
+def _resolve_command(raw: str, rest: str) -> str | None:
+    """Canonical command for `raw` (case-insensitive, aliases allowed) or None."""
+    upper = raw.strip().upper()
+    if upper in COMMANDS:
+        return upper
+    alias = COMMAND_ALIASES.get(upper)
+    # `rm -rf x` / `cp -r a b` are shell commands, not plan commands.
+    if alias and not rest.lstrip().startswith("-"):
+        return alias
+    return None
 
 
 def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     line = lines[i].strip()
-    match = re.match(r"^([A-Z_]+)(?:\s+(.*))?$", line)
-    raw_cmd = match.group(1) if match else line.split()[0]
-    cmd = raw_cmd.strip()
-    if not match or cmd not in COMMANDS:
-        cmd_upper = cmd.upper()
+    match = re.match(r"^([A-Za-z_]+):?(?:\s+(.*))?$", line)
+    raw_cmd = (match.group(1) if match else line.split()[0]).strip()
+    rest = (match.group(2) or "").strip() if match else ""
+
+    command = _resolve_command(raw_cmd, rest) if match else None
+    if command is None:
+        cmd_upper = raw_cmd.upper()
         if cmd_upper in COMMAND_ALIASES:
             hint = f" Did you mean '{COMMAND_ALIASES[cmd_upper]}'?"
-        elif cmd.lower() in {"npm", "pnpm", "yarn", "pytest", "python", "python3", "cargo", "go", "ruff", "black", "git"}:
+        elif raw_cmd.lower() in {"npm", "pnpm", "yarn", "pytest", "python", "python3", "cargo", "go", "ruff", "black", "git"}:
             hint = f" Shell commands must be prefixed with RUN. Did you mean 'RUN {line}'?"
         else:
             matches = difflib.get_close_matches(cmd_upper, sorted(COMMANDS), n=1, cutoff=0.6)
             hint = f" Did you mean '{matches[0]}'?" if matches else ""
-        raise OpError(f"ERR|UNKNOWN_COMMAND|{cmd} - Unsupported command.{hint}")
+        raise OpError(f"ERR|UNKNOWN_COMMAND|{raw_cmd} - Unsupported command.{hint}")
 
-    command = match.group(1)
-    rest = (match.group(2) or "").strip()
     i += 1
 
     if not rest:
         raise ValueError(f"{command} requires an argument")
 
     if command in {"RUN", "COMMIT"}:
-        return Operation(command, (rest,)), i
+        return Operation(command, (_unwrap(rest),)), i
 
     if command in {"MOVE", "COPY", "RENAME"}:
-        pair = re.match(r"^(.+?)\s*->\s*(.+)$", rest)
+        pair = _ARROW.match(rest)
         if not pair:
             raise ValueError(f"{command} requires 'source -> destination'")
         return Operation(command, (clean_path(pair[1]), clean_path(pair[2]))), i
@@ -313,16 +350,17 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
         return Operation("CHMOD", (clean_path(parts[0]), parts[1].strip())), i
 
-    path = clean_path(rest)
     if command in {"DELETE", "MKDIR", "TOUCH"}:
-        return Operation(command, (path,)), i
+        return Operation(command, (clean_path(rest.rstrip(":")),)), i
 
+    # Commands that carry a content block. The opener may trail the path: `CREATE a.py <<<`.
     inline_block = False
-    if rest.endswith("<<<"):
-        rest = rest[:-3].strip()
+    opener = _OPEN_SUFFIX.match(rest)
+    if opener and opener.group(1):
+        rest = opener.group(1)
         inline_block = True
 
-    path = clean_path(rest)
+    path = clean_path(rest.rstrip(":").strip())
 
     if command in {"CREATE", "APPEND", "PREPEND", "PATCH"}:
         content, i = read_block(lines, i, inline_started=inline_block)
@@ -352,7 +390,7 @@ def parse_operations(text: str) -> list[Operation]:
     while i < len(lines):
         line = lines[i].strip()
 
-        if not line or line.startswith("```") or line.startswith("#"):
+        if not line or line.startswith(("```", "~~~")) or line.startswith("#"):
             i += 1
             continue
 
