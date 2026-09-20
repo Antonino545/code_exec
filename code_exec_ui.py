@@ -134,6 +134,66 @@ class TerminalUI:
         color = colors.get(cmd, c.SLATE)
         return c.paint(f" {cmd:<6} ", color, bold=True)
 
+    def panel_top(self, title: str = "", border_color: str | None = None, max_cols: int = 120) -> str:
+        c = self.palette
+        w = self._width(max_cols)
+        inner_w = w - 4
+        b_color = border_color or c.SLATE
+        left = c.paint("╭", b_color)
+        right = c.paint("╮", b_color)
+        horiz = c.paint("─", b_color)
+        if title:
+            dashes = max(0, inner_w - _vlen(title) + 1)
+            return f"{left}{horiz}{title}{c.paint('─' * dashes, b_color)}{right}"
+        return f"{left}{c.paint('─' * (w - 2), b_color)}{right}"
+
+    def panel_row(self, content: str = "", border_color: str | None = None, max_cols: int = 120) -> str:
+        c = self.palette
+        w = self._width(max_cols)
+        inner_w = w - 4
+        b_color = border_color or c.SLATE
+        left = c.paint("│", b_color)
+        right = c.paint("│", b_color)
+        pad = max(0, inner_w - _vlen(content))
+        return f"{left} {content}{' ' * pad} {right}"
+
+    def panel_bottom(self, border_color: str | None = None, max_cols: int = 120) -> str:
+        c = self.palette
+        w = self._width(max_cols)
+        b_color = border_color or c.SLATE
+        left = c.paint("╰", b_color)
+        right = c.paint("╯", b_color)
+        return f"{left}{c.paint('─' * (w - 2), b_color)}{right}"
+
+    def render_panel(
+        self,
+        title: str = "",
+        lines: list[str] | None = None,
+        border_color: str | None = None,
+        max_cols: int = 120,
+        file=None,
+    ) -> None:
+        print(self.panel_top(title, border_color, max_cols), file=file)
+        if lines:
+            for line in lines:
+                print(self.panel_row(line, border_color, max_cols), file=file)
+        print(self.panel_bottom(border_color, max_cols), file=file)
+
+    def prompt_choice(
+        self,
+        prompt_text: str,
+        default: str = "",
+    ) -> str:
+        c = self.palette
+        raw_prompt = prompt_text if prompt_text.endswith(" ") else f"{prompt_text}: "
+        prompt_str = f"  {raw_prompt}" if not raw_prompt.startswith("  ") else raw_prompt
+        try:
+            val = input(c.paint(prompt_str, c.CORAL, bold=True)).strip()
+            return val if val else default
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+
     def describe_op(self, op: Operation) -> str:
         cmd, args = op.command, op.args
         c = self.palette
@@ -251,20 +311,15 @@ class TerminalUI:
         c = self.palette
         w = self._width()
         inner_w = w - 4
-
         self.banner()
-
-        raw_path = f"📁 {root}"
+        raw_path = f"  {root}"
         if _vlen(raw_path) > inner_w - 4:
-            raw_path = f"📁 ...{raw_path[-(inner_w - 10):]}"
-
-        top = f"╭{'─' * (w - 2)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-        path_line = f"│  {c.paint(raw_path, c.WHITE)}{' ' * max(0, inner_w - _vlen(raw_path) - 1)}│"
-
-        print(c.paint(top, c.SLATE))
-        print(path_line)
-        print(c.paint(bot, c.SLATE))
+            raw_path = f"  ...{raw_path[-(inner_w - 10):]}"
+        self.render_panel(
+            title="",
+            lines=[f" {c.paint(raw_path, c.WHITE)}"],
+            border_color=c.SLATE,
+        )
         print()
 
     def project_root(self, root: Path) -> None:
@@ -277,72 +332,46 @@ class TerminalUI:
         deferred_count: int = 0,
     ) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
         total = len(operations)
-
-        title = c.paint(f" Planned Operations ({total}) ", c.WHITE, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        print(c.paint(top, c.SLATE))
-        print(f"│{' ' * (inner_w + 2)}│")
-
+        lines = [""]
         for idx, op in enumerate(operations, 1):
             num = c.paint(f"{idx:>2}.", c.SLATE)
             op_text = self.describe_op(op)
-            line_str = f"  {num} {op_text}"
-            pad = max(0, inner_w - _vlen(line_str))
-            print(f"│ {line_str}{' ' * pad} │")
-
+            lines.append(f"  {num} {op_text}")
         if deferred_count:
-            warn_msg = f"  ▲ {deferred_count} op(s) after {deferred_reason} verified at runtime"
-            pad = max(0, inner_w - _vlen(warn_msg))
-            print(f"│{' ' * (inner_w + 2)}│")
-            print(f"│ {c.paint(warn_msg, c.AMBER)}{' ' * pad} │")
-
-        print(f"│{' ' * (inner_w + 2)}│")
-        print(f"{c.paint(bot, c.SLATE)}\n")
+            lines.append("")
+            warn_msg = f"    {deferred_count} op(s) after {deferred_reason} verified at runtime"
+            lines.append(c.paint(warn_msg, c.AMBER))
+        lines.append("")
+        self.render_panel(
+            title=c.paint(f" Planned Operations ({total}) ", c.WHITE, bold=True),
+            lines=lines,
+            border_color=c.SLATE,
+        )
+        print()
 
     def start_apply(self, total: int) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
         title = c.paint(f" Executing ({total}) ", c.WHITE, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        print(c.paint(top, c.SLATE))
+        print(self.panel_top(title, c.SLATE))
 
     def step_done(self, idx: int, total: int, message: str) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        icon = c.paint("✔", c.GREEN)
+        icon = c.paint("✓", c.GREEN)
         step = c.paint(f"[{idx}/{total}]", c.SLATE)
         content = f"  {icon} {step} {message}"
-        pad = max(0, inner_w - _vlen(content))
-        print(f"│ {content}{' ' * pad} │")
+        print(self.panel_row(content, c.SLATE))
 
     def command(self, cmd: str) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
         prompt = c.paint("❯", c.CYAN, bold=True)
         content = f"  {prompt} {c.paint(cmd, c.WHITE)}"
-        pad = max(0, inner_w - _vlen(content))
-        print(f"│ {content}{' ' * pad} │", flush=True)
+        print(self.panel_row(content, c.SLATE), flush=True)
 
     def confirm(self, diff_text: str | None = None) -> bool:
-        c = self.palette
+        hint = "Apply these changes? [y/N/v] (v: view diff)" if diff_text else "Apply these changes? [y/N]"
         while True:
-            hint = " [y/N/v] (v: view diff): " if diff_text else " [y/N]: "
-            prompt = c.paint(f"  Apply these changes?{hint}", c.CORAL, bold=True)
-            try:
-                answer = input(prompt).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return False
+            answer = self.prompt_choice(hint, default="n").lower()
             if answer in {"v", "view"} and diff_text:
                 self.show_diff(diff_text)
                 continue
@@ -354,27 +383,28 @@ class TerminalUI:
             return
         c = self.palette
         cols = shutil.get_terminal_size((80, 24)).columns
-        w = self._width(max_cols=max(cols - 2, 80))
-        inner_w = w - 4
-        title = c.paint(" Proposed Plan Diff ", c.CYAN, bold=True)
-        top = f"\n {title}{' ' * max(0, inner_w - _vlen(title) + 1)}"
-        bot = f" {' ' * (w - 2)}"
-        print(c.paint(top, c.SLATE))
+        w_max = max(cols - 2, 80)
+        lines = []
         for line in diff_text.splitlines():
             stripped = line.rstrip()
             if stripped.startswith("---") or stripped.startswith("+++"):
-                colored = c.paint(stripped, c.CYAN, bold=True)
+                lines.append(c.paint(stripped, c.CYAN, bold=True))
             elif stripped.startswith("@@"):
-                colored = c.paint(stripped, c.AMBER)
+                lines.append(c.paint(stripped, c.AMBER))
             elif stripped.startswith("+"):
-                colored = c.paint(stripped, c.GREEN)
+                lines.append(c.paint(stripped, c.GREEN))
             elif stripped.startswith("-"):
-                colored = c.paint(stripped, c.RED)
+                lines.append(c.paint(stripped, c.RED))
             else:
-                colored = c.paint(stripped, c.SLATE)
-            pad = max(0, inner_w - _vlen(colored))
-            print(f"  {colored}{' ' * pad} ")
-        print(f"{c.paint(bot, c.SLATE)}\n")
+                lines.append(c.paint(stripped, c.SLATE))
+        print()
+        self.render_panel(
+            title=c.paint(" Proposed Plan Diff ", c.CYAN, bold=True),
+            lines=lines,
+            border_color=c.SLATE,
+            max_cols=w_max,
+        )
+        print()
 
     def cancelled(self) -> None:
         c = self.palette
@@ -382,77 +412,59 @@ class TerminalUI:
 
     def instructions_copied(self, path: Path) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        title = c.paint(" Prompt Copied ", c.GREEN, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        msg1 = "  ✔ Instructions copied to your clipboard!"
-        msg2 = f"  📋 Source: {path.name}"
-        msg3 = "  💡 Tip: Paste (⌘V) into your AI chat to generate plan blocks."
-
-        pad1 = max(0, inner_w - _vlen(msg1))
-        pad2 = max(0, inner_w - _vlen(msg2))
-        pad3 = max(0, inner_w - _vlen(msg3))
-
-        print(c.paint(top, c.SLATE))
-        print(f"│ {c.paint(msg1, c.WHITE, bold=True)}{' ' * pad1} │")
-        print(f"│ {c.paint(msg2, c.SLATE)}{' ' * pad2} │")
-        print(f"  {c.paint(msg3, c.AMBER)}{' ' * pad3} ")
-        print(f"{c.paint(bot, c.SLATE)}\n")
+        lines = [
+            f"    {c.paint('Instructions copied to your clipboard!', c.WHITE, bold=True)}",
+            f"    {c.paint(f'Source: {path.name}', c.SLATE)}",
+            f"    {c.paint('Tip: Paste (⌘V) into your AI chat to generate plan blocks.', c.AMBER)}",
+        ]
+        print()
+        self.render_panel(
+            title=c.paint(" Prompt Copied ", c.GREEN, bold=True),
+            lines=lines,
+            border_color=c.SLATE,
+        )
+        print()
 
     def commit_prompt_copied(self, prompt_len: int) -> None:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
-        title = c.paint(" Commit Prompt Copied ", c.GREEN, bold=True)
-        top = f"\n {title}{' ' * max(0, inner_w - _vlen(title) + 1)}"
-        bot = f" {' ' * (w - 2)}"
-        msg1 = "    Git diff prompt copied to your clipboard!"
-        msg2 = f"    Size: {prompt_len} characters"
-        msg3 = "    Tip: Paste (⌘V / Ctrl+V) into your AI chat to generate a COMMIT plan."
-        pad1 = max(0, inner_w - _vlen(msg1))
-        pad2 = max(0, inner_w - _vlen(msg2))
-        pad3 = max(0, inner_w - _vlen(msg3))
-        print(c.paint(top, c.SLATE))
-        print(f"  {c.paint(msg1, c.WHITE, bold=True)}{' ' * pad1} ")
-        print(f"  {c.paint(msg2, c.SLATE)}{' ' * pad2} ")
+        lines = [
+            f"    {c.paint('Git diff prompt copied to your clipboard!', c.WHITE, bold=True)}",
+            f"    {c.paint(f'Size: {prompt_len} characters', c.SLATE)}",
+            f"    {c.paint('Tip: Paste (⌘V / Ctrl+V) into your AI chat to generate a COMMIT plan.', c.AMBER)}",
+        ]
+        print()
+        self.render_panel(
+            title=c.paint(" Commit Prompt Copied ", c.GREEN, bold=True),
+            lines=lines,
+            border_color=c.SLATE,
+        )
+        print()
         print(f"  {c.paint(msg3, c.AMBER)}{' ' * pad3} ")
         print(f"{c.paint(bot, c.SLATE)}\n")
 
     def interactive_menu(self, root: Path) -> str:
         c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
         self.header(root)
-
-        title = c.paint(" Menu ", c.CORAL, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        def _row(text: str = "") -> None:
-            pad = max(0, inner_w - _vlen(text))
-            print(f"│ {text}{' ' * pad} │")
-
-        print(c.paint(top, c.SLATE))
-        _row()
-        _row(f"  {c.paint('1.', c.CORAL, bold=True)} {c.paint('Apply plan', c.WHITE, bold=True)} from clipboard")
-        _row(f"  {c.paint('2.', c.CORAL, bold=True)} {c.paint('Dry-run', c.WHITE, bold=True)} validate plan from clipboard")
-        _row(f"  {c.paint('3.', c.CORAL, bold=True)} {c.paint('Copy AI prompt', c.WHITE, bold=True)} instructions to clipboard ({c.paint('-p', c.CYAN)})")
-        _row(f"  {c.paint('4.', c.CORAL, bold=True)} {c.paint('Quick guide', c.WHITE, bold=True)} & syntax reference ({c.paint('-h', c.CYAN)})")
-        _row(f"  {c.paint('5.', c.CORAL, bold=True)} {c.paint('Check for updates', c.WHITE, bold=True)} from GitHub ({c.paint('update', c.CYAN)})")
-        _row(f"  {c.paint('6.', c.CORAL, bold=True)} {c.paint('Undo last plan', c.WHITE, bold=True)} revert file changes ({c.paint('undo', c.CYAN)})")
-        _row(f"  {c.paint('7.', c.CORAL, bold=True)} {c.paint('Commit prompt', c.WHITE, bold=True)} copy git diff prompt to clipboard ({c.paint('-c', c.CYAN)})")
-        _row(f"  {c.paint('q.', c.SLATE, bold=True)} Exit")
-        _row()
-        print(f"{c.paint(bot, c.SLATE)}\n")
-
-        prompt = c.paint("  Choose an option [1/2/3/4/5/6/7/q]: ", c.CORAL, bold=True)
+        lines = [
+            "",
+            f"  {c.paint('1.', c.CORAL, bold=True)} {c.paint('Apply plan', c.WHITE, bold=True)} from clipboard",
+            f"  {c.paint('2.', c.CORAL, bold=True)} {c.paint('Dry-run', c.WHITE, bold=True)} validate plan from clipboard",
+            f"  {c.paint('3.', c.CORAL, bold=True)} {c.paint('Copy AI prompt', c.WHITE, bold=True)} instructions to clipboard ({c.paint('-p', c.CYAN)})",
+            f"  {c.paint('4.', c.CORAL, bold=True)} {c.paint('Quick guide', c.WHITE, bold=True)} & syntax reference ({c.paint('-h', c.CYAN)})",
+            f"  {c.paint('5.', c.CORAL, bold=True)} {c.paint('Check for updates', c.WHITE, bold=True)} from GitHub ({c.paint('update', c.CYAN)})",
+            f"  {c.paint('6.', c.CORAL, bold=True)} {c.paint('Undo last plan', c.WHITE, bold=True)} revert file changes ({c.paint('undo', c.CYAN)})",
+            f"  {c.paint('7.', c.CORAL, bold=True)} {c.paint('Commit prompt', c.WHITE, bold=True)} copy git diff prompt to clipboard ({c.paint('-c', c.CYAN)})",
+            f"  {c.paint('q.', c.SLATE, bold=True)} Exit",
+            "",
+        ]
+        self.render_panel(
+            title=c.paint(" Menu ", c.CORAL, bold=True),
+            lines=lines,
+            border_color=c.SLATE,
+        )
+        print()
         try:
-            return input(prompt).strip().lower()
+            return self.prompt_choice("Choose an option [1/2/3/4/5/6/7/q]", default="q").lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return "q"
@@ -461,99 +473,68 @@ class TerminalUI:
         c = self.palette
         w = self._width()
         inner_w = w - 4
+def prompt_commit(self, default_msg: str) -> bool:
+    c = self.palette
+    lines = [
+        f"  Message: {c.paint(default_msg, c.WHITE, bold=True)}"
+    ]
+    print()
+    self.render_panel(
+        title=c.paint(" Git Commit ", c.CYAN, bold=True),
+        lines=lines,
+        border_color=c.SLATE,
+    )
+    answer = self.prompt_choice("Commit these changes to git? [y/N]", default="n").lower()
+    return answer in {"y", "yes"}
 
-        title = c.paint(" Git Commit ", c.CYAN, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
+def commit_success(self, commit_output: str, commit_msg: str) -> None:
+    c = self.palette
+    lines = [f"    {c.paint(commit_msg, c.WHITE, bold=True)}"]
+    first_line = next((ln.strip() for ln in commit_output.split("\n") if ln.strip()), "")
+    if first_line:
+        lines.append(f"  {c.paint(first_line, c.SLATE)}")
+    self.render_panel(
+        title=c.paint(" Committed ", c.GREEN, bold=True),
+        lines=lines,
+        border_color=c.SLATE,
+    )
+    print()
 
-        msg_line = f"  Message: {c.paint(default_msg, c.WHITE, bold=True)}"
-        pad = max(0, inner_w - _vlen(msg_line))
+def commit_failed(self, error: str) -> None:
+    c = self.palette
+    lines = [f"    {c.paint(error, c.AMBER)}"]
+    self.render_panel(
+        title=c.paint(" Commit Skipped ", c.AMBER, bold=True),
+        lines=lines,
+        border_color=c.SLATE,
+    )
+    print()
 
-        print(c.paint(top, c.SLATE))
-        print(f"│ {msg_line}{' ' * pad} │")
-        print(f"{c.paint(bot, c.SLATE)}")
+def dry_run(self) -> None:
+    c = self.palette
+    lines = [f"    {c.paint('All checks passed. Plan is completely valid!', c.WHITE)}"]
+    self.render_panel(
+        title=c.paint(" Dry Run Validation ", c.GREEN, bold=True),
+        lines=lines,
+        border_color=c.SLATE,
+    )
+    print()
 
-        prompt = c.paint("❯ Commit these changes to git? [y/N]: ", c.CORAL, bold=True)
-        try:
-            answer = input(prompt).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return False
-        return answer in {"y", "yes"}
-
-    def commit_success(self, commit_output: str, commit_msg: str) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        title = c.paint(" Committed ", c.GREEN, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        msg1 = f"  ✔ {commit_msg}"
-        pad1 = max(0, inner_w - _vlen(msg1))
-
-        print(c.paint(top, c.SLATE))
-        print(f"│ {c.paint(msg1, c.WHITE, bold=True)}{' ' * pad1} │")
-        first_line = next((ln.strip() for ln in commit_output.split("\n") if ln.strip()), "")
-        if first_line:
-            out_line = f"  {first_line}"
-            pad2 = max(0, inner_w - _vlen(out_line))
-            print(f"│ {c.paint(out_line, c.SLATE)}{' ' * pad2} │")
-        print(f"{c.paint(bot, c.SLATE)}\n")
-
-    def commit_failed(self, error: str) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        title = c.paint(" Commit Skipped ", c.AMBER, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        err_line = f"  ▲ {error}"
-        pad = max(0, inner_w - _vlen(err_line))
-
-        print(c.paint(top, c.SLATE))
-        print(f"│ {c.paint(err_line, c.AMBER)}{' ' * pad} │")
-        print(f"{c.paint(bot, c.SLATE)}\n")
-
-    def dry_run(self) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        title = c.paint(" Dry Run Validation ", c.GREEN, bold=True)
-        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        msg = f"  ✔ All checks passed. Plan is completely valid!"
-        pad = max(0, inner_w - _vlen(msg))
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        print(c.paint(top, c.SLATE))
-        print(f"│ {c.paint(msg, c.WHITE)}{' ' * pad} │")
-        print(f"{c.paint(bot, c.SLATE)}\n")
-
-    def done(self, has_git: bool = False) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-        bot = f"╰{'─' * (w - 2)}╯"
-        print(c.paint(bot, c.SLATE))
-
-        title = c.paint(" Success ", c.GREEN, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        msg1 = "  ✔ All operations applied cleanly."
-        pad1 = max(0, inner_w - _vlen(msg1))
-
-        print(c.paint(top, c.SLATE))
-        print(f"│ {c.paint(msg1, c.WHITE, bold=True)}{' ' * pad1} │")
-
-        if has_git:
-            msg2 = f"  💡 Review changes: {c.paint('git diff', c.CYAN)}"
-            pad2 = max(0, inner_w - _vlen(msg2))
-            print(f"│ {msg2}{' ' * pad2} │")
-
-        print(f"╰{'─' * (w - 2)}╯\n")
+def done(self, has_git: bool = False) -> None:
+    c = self.palette
+    print(self.panel_bottom(c.SLATE))
+    lines = [
+        f"    {c.paint('All operations applied cleanly.', c.WHITE, bold=True)}"
+    ]
+    if has_git:
+        lines.append(f"    Review changes: {c.paint('git diff', c.CYAN)}")
+    print()
+    self.render_panel(
+        title=c.paint(" Success ", c.GREEN, bold=True),
+        lines=lines,
+        border_color=c.SLATE,
+    )
+    print()
 
     def warn(self, message: str) -> None:
         c = self.palette
@@ -561,95 +542,83 @@ class TerminalUI:
 
     def error(self, message: str) -> None:
         c = self.palette
-        cols = shutil.get_terminal_size((80, 24)).columns
-        w = self._width(max_cols=max(cols - 2, 80))
-        inner_w = w - 4
-
-        title = c.paint(" Execution / Validation Error ", c.RED, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        bot = f"╰{'─' * (w - 2)}╯"
-
-        print(c.paint(top, c.RED), file=sys.stderr)
-
-        lines = message.split("\n")
-        in_diff = False
-
-        for line in lines:
-            stripped = line.strip()
-
-            # Empty spacer line
-            if not stripped:
-                print(f"│{' ' * (inner_w + 2)}│", file=sys.stderr)
-                continue
-
-            # Diff boundaries
-            if set(stripped) == {"-"}:
-                in_diff = True
-                divider = f"  {'─' * (inner_w - 4)}"
-                pad = max(0, inner_w - _vlen(divider))
-                print(f"│ {c.paint(divider, c.SLATE)}{' ' * pad} │", file=sys.stderr)
-                continue
-
-            # Diff lines colorization
-            if in_diff:
-                if stripped.startswith("---") or stripped.startswith("+++"):
-                    colored = f"  {c.paint(stripped, c.CYAN)}"
-                elif stripped.startswith("@@"):
-                    colored = f"  {c.paint(stripped, c.AMBER)}"
-                elif stripped.startswith("-"):
-                    colored = f"  {c.paint(stripped, c.RED)}"
-                elif stripped.startswith("+"):
-                    colored = f"  {c.paint(stripped, c.GREEN)}"
+        def error(self, message: str) -> None:
+            c = self.palette
+            cols = shutil.get_terminal_size((80, 24)).columns
+            w_max = max(cols - 2, 80)
+            panel_lines = []
+            raw_lines = message.split("\n")
+            in_diff = False
+            for line in raw_lines:
+                stripped = line.strip()
+                if not stripped:
+                    panel_lines.append("")
+                    continue
+                if set(stripped) == {"-"}:
+                    in_diff = True
+                    panel_lines.append(c.paint("─" * (min(w_max - 8, 60)), c.SLATE))
+                    continue
+                if in_diff:
+                    if stripped.startswith("---") or stripped.startswith("+++"):
+                        panel_lines.append(c.paint(f"  {stripped}", c.CYAN))
+                    elif stripped.startswith("@@"):
+                        panel_lines.append(c.paint(f"  {stripped}", c.AMBER))
+                    elif stripped.startswith("-"):
+                        panel_lines.append(c.paint(f"  {stripped}", c.RED))
+                    elif stripped.startswith("+"):
+                        panel_lines.append(c.paint(f"  {stripped}", c.GREEN))
+                    else:
+                        panel_lines.append(c.paint(f"  {stripped}", c.SLATE))
+                    continue
+                if "ERR|" in stripped:
+                    parts = stripped.split("ERR|", 1)
+                    prefix = parts[0]
+                    err_token = f"ERR|{parts[1]}"
+                    colored_err = c.paint(err_token, c.AMBER, bold=True)
+                    panel_lines.append(f"  {prefix}{colored_err}")
+                elif stripped.startswith("Closest candidate"):
+                    badge = c.paint(" SIMILARITY MATCH ", c.CYAN, bold=True)
+                    panel_lines.append(f"  {badge} {c.paint(stripped, c.WHITE)}")
                 else:
-                    colored = f"  {c.paint(stripped, c.SLATE)}"
-                pad = max(0, inner_w - _vlen(colored))
-                print(f"│ {colored}{' ' * pad} │", file=sys.stderr)
-                continue
+                    panel_lines.append(f"  {c.paint(line, c.RED)}")
 
-            # Machine-readable error code tags (ERR|...)
-            if "ERR|" in stripped:
-                parts = stripped.split("ERR|", 1)
-                prefix = parts[0]
-                err_token = f"ERR|{parts[1]}"
-                colored_err = c.paint(err_token, c.AMBER, bold=True)
-                formatted = f"  ✖ {prefix}{colored_err}"
-                pad = max(0, inner_w - _vlen(formatted))
-                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
-            elif stripped.startswith("Closest candidate"):
-                badge = c.paint(" SIMILARITY MATCH ", c.CYAN, bold=True)
-                formatted = f"  ▲ {badge} {c.paint(stripped, c.WHITE)}"
-                pad = max(0, inner_w - _vlen(formatted))
-                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
-            else:
-                formatted = f"  ✖ {c.paint(line, c.RED)}"
-                pad = max(0, inner_w - _vlen(formatted))
-                print(f"│ {formatted}{' ' * pad} │", file=sys.stderr)
+            hint = ""
+            if "ERR|SEARCH_TOO_BIG" in message:
+                hint = "Tip: SEARCH block is too large (limit is 60 lines / 4000 chars). Use a smaller unique anchor."
+            elif "ERR|SEARCH_NOT_FOUND" in message:
+                hint = "Tip: SEARCH block didn't match. Compare against the diff above and add unique lines."
+            elif "ERR|SEARCH_AMBIGUOUS" in message:
+                hint = "Tip: SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."
+            elif "ERR|CONFLICTING_OPERATIONS" in message:
+                hint = "Tip: The plan performs contradictory operations on the same file. Separate or order your edits."
+            elif "ERR|FORBIDDEN_COMMAND" in message:
+                hint = "Tip: RUN command not permitted. Use whitelisted test runners or run manually."
+            elif "ERR|FILE_PROTECTED" in message:
+                hint = "Tip: Target is a sensitive file/key. Modify configuration files manually."
+            elif "ERR|MULTIPLE_PLANS" in message:
+                hint = "Tip: Multiple plan blocks found. Provide a single plan block per response."
+            elif "ERR|UNKNOWN_COMMAND" in message:
+                hint = "Tip: Unsupported command. Check the hint or run 'code-exec -h' for supported instructions."
+            elif "ERR|PATCH_FAILED" in message:
+                hint = "Tip: Unified diff hunk could not be matched. Verify context lines or use EDIT."
 
-        # Contextual recommendation banner
-        hint = ""
-        if "ERR|SEARCH_TOO_BIG" in message:
-            hint = "Tip: SEARCH block is too large (limit is 60 lines / 4000 chars). Use a smaller unique anchor."
-        elif "ERR|SEARCH_NOT_FOUND" in message:
-            hint = "Tip: SEARCH block didn't match. Compare against the diff above and add unique lines."
-        elif "ERR|SEARCH_AMBIGUOUS" in message:
-            hint = "Tip: SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."
-        elif "ERR|CONFLICTING_OPERATIONS" in message:
-            hint = "Tip: The plan performs contradictory operations on the same file. Separate or order your edits."
-        elif "ERR|FORBIDDEN_COMMAND" in message:
-            hint = "Tip: RUN command not permitted. Use whitelisted test runners or run manually."
-        elif "ERR|FILE_PROTECTED" in message:
-            hint = "Tip: Target is a sensitive file/key. Modify configuration files manually."
-        elif "ERR|MULTIPLE_PLANS" in message:
-            hint = "Tip: Multiple plan blocks found. Provide a single plan block per response."
-        elif "ERR|UNKNOWN_COMMAND" in message:
-            hint = "Tip: Unsupported command. Check the hint or run 'code-exec -h' for supported instructions."
-        elif "ERR|PATCH_FAILED" in message:
-            hint = "Tip: Unified diff hunk could not be matched. Verify context lines or use EDIT."
+            if hint:
+                panel_lines.append("")
+                panel_lines.append(f"  {c.paint(hint, c.AMBER)}")
 
-        if hint:
-            print(f" {' ' * (inner_w + 2)} ", file=sys.stderr)
-            hint_str = f"    {c.paint(hint, c.AMBER)}"
-            pad = max(0, inner_w - _vlen(hint_str))
+            info_note = "Diagnostics prompt copied to clipboard for your AI chat."
+            panel_lines.append(f"  {c.paint(info_note, c.SLATE)}")
+            panel_lines.append("")
+
+            print(file=sys.stderr)
+            self.render_panel(
+                title=c.paint(" Execution / Validation Error ", c.RED, bold=True),
+                lines=panel_lines,
+                border_color=c.RED,
+                max_cols=w_max,
+                file=sys.stderr,
+            )
+            print(file=sys.stderr)
             print(f"  {hint_str}{' ' * pad}  ", file=sys.stderr)
 
         info_note = "ℹ Diagnostics prompt copied to clipboard for your AI chat."
@@ -664,73 +633,70 @@ class TerminalUI:
         w = self._width()
         inner_w = w - 4
         bot = f"╰{'─' * (w - 2)}╯"
-        print(c.paint(bot, c.SLATE))
+        def command_failed(self, error: str, backup_dir: Path | None) -> None:
+            c = self.palette
+            print(self.panel_bottom(c.SLATE), file=sys.stderr)
+            lines = [
+                f"    {c.paint(error, c.RED)}",
+                f"    {c.paint('Stopped. Earlier changes kept.', c.AMBER)}",
+            ]
+            if backup_dir is not None:
+                lines.append(f"    {c.paint(f'Backups: {backup_dir}', c.SLATE)}")
+            print(file=sys.stderr)
+            self.render_panel(
+                title=c.paint(" Command Failed ", c.RED, bold=True),
+                lines=lines,
+                border_color=c.RED,
+                file=sys.stderr,
+            )
+            print(file=sys.stderr)
 
-        title = c.paint(" Command Failed ", c.RED, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        msg1 = f"  ✖ {error}"
-        msg2 = "  ✋ Stopped. Earlier changes kept."
-        pad1 = max(0, inner_w - _vlen(msg1))
-        pad2 = max(0, inner_w - _vlen(msg2))
+        def apply_interrupted(self, exc: Exception) -> None:
+            c = self.palette
+            print(self.panel_bottom(c.SLATE), file=sys.stderr)
+            msg = "    Execution interrupted by user." if isinstance(exc, KeyboardInterrupt) else f"    {exc}"
+            lines = [f"  {c.paint(msg, c.RED)}"]
+            print(file=sys.stderr)
+            self.render_panel(
+                title=c.paint(" Interrupted ", c.RED, bold=True),
+                lines=lines,
+                border_color=c.RED,
+                file=sys.stderr,
+            )
+            print(file=sys.stderr)
 
-        print(c.paint(top, c.RED), file=sys.stderr)
-        print(f"│ {c.paint(msg1, c.RED)}{' ' * pad1} │", file=sys.stderr)
-        print(f"│ {c.paint(msg2, c.AMBER)}{' ' * pad2} │", file=sys.stderr)
-        if backup_dir is not None:
-            msg3 = f"  📦 Backups: {backup_dir}"
-            pad3 = max(0, inner_w - _vlen(msg3))
-            print(f"│ {c.paint(msg3, c.SLATE)}{' ' * pad3} │", file=sys.stderr)
-        print(f"{c.paint(bot, c.RED)}\n", file=sys.stderr)
-
-    def apply_interrupted(self, exc: Exception) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-        bot = f"╰{'─' * (w - 2)}╯"
-        print(c.paint(bot, c.SLATE))
-
-        title = c.paint(" Interrupted ", c.RED, bold=True)
-        top = f"\n╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-        msg = "  ✖ Execution interrupted by user." if isinstance(exc, KeyboardInterrupt) else f"  ✖ {exc}"
-        pad = max(0, inner_w - _vlen(msg))
-
-        print(c.paint(top, c.RED), file=sys.stderr)
-        print(f"│ {c.paint(msg, c.RED)}{' ' * pad} │", file=sys.stderr)
-        print(f"{c.paint(bot, c.RED)}\n", file=sys.stderr)
-
-    def rollback_report(
-        self,
-        errors: list[str],
-        count: int,
-        backup_dir: Path | None,
-        ran_commands: list[str],
-    ) -> None:
-        c = self.palette
-        w = self._width()
-        inner_w = w - 4
-
-        if errors:
-            title = c.paint(" Incomplete Rollback ", c.RED, bold=True)
-            top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-            print(c.paint(top, c.RED), file=sys.stderr)
-            for err in errors:
-                err_line = f"  ✖ {err}"
-                pad = max(0, inner_w - _vlen(err_line))
-                print(f"│ {c.paint(err_line, c.RED)}{' ' * pad} │", file=sys.stderr)
-            print(f"╰{'─' * (w - 2)}╯\n", file=sys.stderr)
-        else:
-            title = c.paint(" Rollback Complete ", c.GREEN, bold=True)
-            top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
-            msg = f"  ✔ Rolled back {count} change(s); directory restored."
-            pad = max(0, inner_w - _vlen(msg))
-            print(c.paint(top, c.SLATE), file=sys.stderr)
-            print(f"│ {c.paint(msg, c.SLATE)}{' ' * pad} │", file=sys.stderr)
-            print(f"╰{'─' * (w - 2)}╯\n", file=sys.stderr)
-
-        if ran_commands:
-            print(c.paint("  Commands executed prior to rollback:", c.SLATE))
-            for cmd in ran_commands:
-                print(c.paint(f"    ❯ {cmd}", c.SLATE))
+        def rollback_report(
+            self,
+            errors: list[str],
+            count: int,
+            backup_dir: Path | None,
+            ran_commands: list[str],
+        ) -> None:
+            c = self.palette
+            if errors:
+                lines = [f"    {c.paint(err, c.RED)}" for err in errors]
+                self.render_panel(
+                    title=c.paint(" Incomplete Rollback ", c.RED, bold=True),
+                    lines=lines,
+                    border_color=c.RED,
+                    file=sys.stderr,
+                )
+                print(file=sys.stderr)
+            else:
+                lines = [
+                    f"    {c.paint(f'Rolled back {count} change(s); directory restored.', c.SLATE)}"
+                ]
+                self.render_panel(
+                    title=c.paint(" Rollback Complete ", c.GREEN, bold=True),
+                    lines=lines,
+                    border_color=c.SLATE,
+                    file=sys.stderr,
+                )
+                print(file=sys.stderr)
+            if ran_commands:
+                print(c.paint("  Commands executed prior to rollback:", c.SLATE), file=sys.stderr)
+                for cmd in ran_commands:
+                    print(c.paint(f"      {cmd}", c.SLATE), file=sys.stderr)
 
 
 ui = TerminalUI()
