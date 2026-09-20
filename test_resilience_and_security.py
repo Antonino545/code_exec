@@ -241,6 +241,20 @@ class TestResilienceAndSecurity(unittest.TestCase):
             self.assertIn("ERR|SEARCH_NOT_FOUND|foo.py", clipboard_content)
             self.assertIn("`code_exec` plan failed", clipboard_content)
 
+    def test_generate_commit_prompt(self):
+        from unittest.mock import patch, MagicMock
+        from code_exec import generate_commit_prompt
+
+        fake_diff = MagicMock(stdout="diff --git a/test.py b/test.py\n+new_feature = True\n")
+        fake_status = MagicMock(stdout="?? untracked_file.txt\n")
+
+        with patch("subprocess.run", side_effect=[fake_diff, fake_status]):
+            prompt = generate_commit_prompt()
+            self.assertIn("Generate a concise, scoped conventional commit message", prompt)
+            self.assertIn("+new_feature = True", prompt)
+            self.assertIn("untracked_file.txt", prompt)
+            self.assertIn("COMMIT type(scope):", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -176,7 +176,30 @@ def execute(op: Operation, fs) -> str | None:
 
         fs.write(path, new)
         return f"{done} {args[0]}{note}"
-
+    if command == "REPLACE_ALL":
+        path = safe_path(args[0])
+        if not fs.is_file(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+        doc = fs.read(path)
+        newline = newline_style(doc)
+        search = with_newlines(op.data, newline)
+        replace = with_newlines(op.extra, newline)
+        if not search:
+            raise OpError(f"SEARCH block is empty for REPLACE_ALL in {args[0]}")
+        count = doc.count(search)
+        if count == 0:
+            raise OpError(f"ERR|SEARCH_NOT_FOUND|{args[0]} - pattern not found for REPLACE_ALL")
+        new = doc.replace(search, replace)
+        fs.write(path, new)
+        return f"Replaced {count} occurrence(s) in {args[0]}"
+    if command == "TOUCH":
+        path = safe_path(args[0], follow_leaf=False)
+        fs.touch(path)
+        return f"Touched {args[0]}"
+    if command == "CHMOD":
+        path = safe_path(args[0])
+        fs.chmod(path, args[1])
+        return f"Changed mode of {args[0]} to {args[1]}"
     if command == "DELETE":
         path = safe_path(args[0], follow_leaf=False)
         if not fs.lexists(path):
@@ -245,7 +268,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 execute(op, vfs)
             except Exception:
                 pass
-        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
+        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "REPLACE_ALL"}:
             target = op.args[0]
             try:
                 target_path = safe_path(target)
@@ -263,6 +286,11 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                     tofile=f"b/{target}",
                 )
                 diff_lines.extend(diff)
+            except Exception:
+                pass
+        elif cmd in {"TOUCH", "CHMOD"}:
+            try:
+                execute(op, vfs)
             except Exception:
                 pass
         elif cmd == "DELETE":
@@ -307,9 +335,9 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
                 history = file_history.setdefault(path_str, [])
                 if op.command == "CREATE" and "CREATE" in history:
                     raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
-                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "CHMOD"}:
                     if "DELETE" in history:
-                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to EDIT a file that was DELETED in the same plan")
+                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to operate on a file that was DELETED in the same plan")
                 history.append(op.command)
 
     # Phase 2: Virtual Simulation
@@ -348,7 +376,20 @@ def describe_operation(op: Operation) -> str:
 # Main
 # ============================================================
 
+def copy_error_to_clipboard(error_msg: str) -> None:
+    prompt = (
+        "The previous `code_exec` plan failed with the following error:\n\n"
+        f"```\n{error_msg.strip()}\n```\n\n"
+        "Please analyze this error and output a single revised ```code_exec ... ``` block fixing the issue."
+    )
+    try:
+        set_clipboard(prompt)
+    except Exception:
+        pass
+
+
 def fail(message: str) -> int:
+    copy_error_to_clipboard(message)
     ui.error(message)
     return 1
 
@@ -363,6 +404,42 @@ def read_input(args) -> str:
 
 def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
+
+
+def generate_commit_prompt() -> str:
+    """Collects git diff and untracked files into an AI prompt for commit generation."""
+    if not (ROOT / ".git").exists():
+        raise OpError("ERR|NOT_GIT_REPO|Current directory is not a git repository (.git missing)")
+
+    diff_res = subprocess.run(["git", "diff", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    diff_text = diff_res.stdout.strip()
+    if not diff_text:
+        diff_cached = subprocess.run(["git", "diff", "--cached"], cwd=ROOT, capture_output=True, text=True)
+        diff_unstaged = subprocess.run(["git", "diff"], cwd=ROOT, capture_output=True, text=True)
+        diff_text = f"{diff_cached.stdout}\n{diff_unstaged.stdout}".strip()
+
+    status_res = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True)
+    untracked = [line[3:].strip() for line in status_res.stdout.splitlines() if line.startswith("?? ")]
+
+    if not diff_text and not untracked:
+        raise OpError("No changes detected in git repository (working tree clean)")
+
+    sections = []
+    if diff_text:
+        sections.append(f"```diff\n{diff_text}\n```")
+    if untracked:
+        untracked_list = "\n".join(f"- {p}" for p in untracked)
+        sections.append(f"Untracked new files:\n{untracked_list}")
+
+    changes_body = "\n\n".join(sections)
+    return (
+        "Generate a concise, scoped conventional commit message for the following repository changes.\n\n"
+        f"{changes_body}\n\n"
+        "Output ONLY a single executable `code_exec` block:\n"
+        "```code_exec\n"
+        "COMMIT type(scope): concise summary\n"
+        "```"
+    )
 
 
 def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
@@ -420,16 +497,18 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
-                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
                     modified_paths.extend([op.args[0], op.args[1]])
 
     except CommandFailed as exc:
+        copy_error_to_clipboard(str(exc))
         ui.command_failed(str(exc), fs.backup_dir)
         return 1
-
     except (Exception, KeyboardInterrupt) as exc:
+        if not isinstance(exc, KeyboardInterrupt):
+            copy_error_to_clipboard(str(exc))
         ui.apply_interrupted(exc)
         count = len(fs.journal)
         errors = fs.rollback()
@@ -469,6 +548,8 @@ def main(argv=None) -> int:
                         help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
                         help="Show interactive usage guide and options")
+    parser.add_argument("-c", "--commit-prompt", "--docommit", dest="commit_prompt", action="store_true",
+                        help="Copy git diff prompt to clipboard for AI commit message generation")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--diff", action="store_true",
@@ -509,6 +590,9 @@ def main(argv=None) -> int:
             print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
             return 0
         return fail(msg)
+    elif args.action in {"7", "commit-prompt", "docommit", "commit"}:
+        args.commit_prompt = True
+        args.action = None
     elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
         print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
@@ -555,12 +639,23 @@ def main(argv=None) -> int:
                 print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
                 return 0
             return fail(msg)
+        elif choice in {"7", "c", "commit", "commit-prompt", "docommit"}:
+            args.commit_prompt = True
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
 
     if args.help:
         ui.show_guide()
+        return 0
+
+    if args.commit_prompt:
+        try:
+            prompt_body = generate_commit_prompt()
+            set_clipboard(prompt_body)
+        except Exception as exc:
+            return fail(f"Could not generate commit prompt: {exc}")
+        ui.commit_prompt_copied(len(prompt_body))
         return 0
 
     if args.prompt:

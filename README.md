@@ -144,6 +144,10 @@ code-exec apply --diff
 # Revert the most recently applied plan
 code-exec undo
 
+# Copy git diff prompt to clipboard for AI commit generation
+code-exec -c
+# Or alias: code-exec docommit
+
 # Validate plan without touching files
 code-exec --dry-run
 
