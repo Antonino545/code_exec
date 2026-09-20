@@ -319,6 +319,51 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         execute(op, vfs)
         self.assertIn("line 2: temperature = 22.0°", vfs.read(test_file))
 
+    def test_fuzzy_search_python_code(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_code.py"
+        vfs.write(test_file, "def calculate_total(price, tax=0.22):\n    return price * (1 + tax)\n")
+
+        # Search query with minor parameter rename / space drift (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("test_code.py",),
+            "def calculate_total(price, tax = 0.20):\n    return price * (1 + tax)\n",
+            "def calculate_total(price, tax=0.25):\n    return price * (1 + tax)\n",
+        )
+        execute(op, vfs)
+        self.assertIn("tax=0.25", vfs.read(test_file))
+
+    def test_fuzzy_search_jsx_component(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "TestComp.jsx"
+        vfs.write(test_file, "export function Header({ title, active }) {\n  return <nav className=\"navbar primary\">{title}</nav>;\n}\n")
+
+        # Search query with modified className attribute value (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("TestComp.jsx",),
+            "export function Header({ title, active }) {\n  return <nav className=\"navbar secondary\">{title}</nav>;\n}\n",
+            "export function Header({ title, active }) {\n  return <nav className=\"navbar fixed\">{title}</nav>;\n}\n",
+        )
+        execute(op, vfs)
+        self.assertIn("navbar fixed", vfs.read(test_file))
+
+    def test_fuzzy_search_html_template(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "template.html"
+        vfs.write(test_file, "<div class=\"card shadow-lg p-4\">\n  <h1>Welcome back</h1>\n</div>\n")
+
+        # Search query with spacing and class attribute variation (>90% similarity)
+        op = Operation(
+            "EDIT",
+            ("template.html",),
+            "<div class=\"card shadow-sm p-4\">\n  <h1>Welcome back</h1>\n</div>\n",
+            "<div class=\"card shadow-lg p-6\">\n  <h1>Welcome home</h1>\n</div>\n",
+        )
+        execute(op, vfs)
+        self.assertIn("Welcome home", vfs.read(test_file))
+
     def test_sandboxed_command_builder(self):
         from code_exec import build_sandboxed_command
 
