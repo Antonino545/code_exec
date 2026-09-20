@@ -1100,18 +1100,23 @@ def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def perform_git_commit(message: str) -> tuple[bool, str]:
+def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
+    if not paths:
+        return False, "No modified files to commit."
     try:
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
+        # Stage only the specific files affected by the plan
+        subprocess.run(["git", "add", "--", *paths], cwd=ROOT, check=True)
+        
+        # Check if any staged changes exist for these paths
+        diff_cached = subprocess.run(
+            ["git", "diff", "--cached", "--name-only", "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
         )
-        if not status.stdout.strip():
-            return False, "No changes detected to commit."
+        if not diff_cached.stdout.strip():
+            return False, "No staged changes detected for modified files."
 
-        subprocess.run(["git", "add", "-A"], cwd=ROOT, check=True)
         res = subprocess.run(
-            ["git", "commit", "-m", message],
+            ["git", "commit", "-m", message, "--", *paths],
             cwd=ROOT, capture_output=True, text=True, check=True
         )
         return True, res.stdout.strip()
@@ -1136,6 +1141,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
     commit_msg = commit_op.args[0] if commit_op else None
 
     ui.start_apply(len(exec_ops))
+    modified_paths: list[str] = []
 
     try:
         step = 0
@@ -1151,6 +1157,11 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
+                # Collect modified paths for scoped git commit
+                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER"}:
+                    modified_paths.append(op.args[0])
+                elif op.command in {"MOVE", "COPY", "RENAME"}:
+                    modified_paths.extend([op.args[0], op.args[1]])
 
     except CommandFailed as exc:
         ui.command_failed(str(exc), fs.backup_dir)
@@ -1172,7 +1183,9 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
     if has_git and commit_msg and not no_commit:
         should_commit = auto_commit or ui.prompt_commit(commit_msg)
         if should_commit:
-            success, out = perform_git_commit(commit_msg)
+            # Deduplicate paths while preserving order
+            unique_paths = list(dict.fromkeys(modified_paths))
+            success, out = perform_git_commit(commit_msg, unique_paths)
             if success:
                 ui.commit_success(out, commit_msg)
             else:
