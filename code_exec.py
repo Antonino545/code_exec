@@ -87,7 +87,7 @@ def safe_path(value: str, *, follow_leaf: bool = True) -> Path:
     itself, and protected names such as .git.
     """
     if not value or "\0" in value:
-        raise OpError("Empty or invalid path")
+        raise OpError(f"ERR|INVALID_PATH|{value} - Empty or invalid path")
 
     candidate = Path(os.path.normpath(os.path.join(ROOT, value)))
 
@@ -98,13 +98,13 @@ def safe_path(value: str, *, follow_leaf: bool = True) -> Path:
             resolved = candidate.parent.resolve() / candidate.name
         relative = resolved.relative_to(ROOT)
     except (ValueError, OSError, RuntimeError):
-        raise OpError(f"Path outside project: {value}") from None
+        raise OpError(f"ERR|INVALID_PATH|{value} - Path outside project: {value}") from None
 
     if not relative.parts:
-        raise OpError(f"Refusing to operate on the project root: {value!r}")
+        raise OpError(f"ERR|INVALID_PATH|{value} - Refusing to operate on the project root: {value!r}")
 
     if any(part.lower() in PROTECTED_NAMES for part in relative.parts):
-        raise OpError(f"Refusing to touch protected path: {value}")
+        raise OpError(f"ERR|PROTECTED_PATH|{value} - Refusing to touch protected path: {value}")
 
     return resolved
 
@@ -223,6 +223,8 @@ def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[
             matched = all(doc_lines[i + j].rstrip("\r ") == want[j] for j in range(size))
         elif mode == "indent":
             matched = all(doc_lines[i + j].strip() == want[j] for j in range(size))
+        elif mode == "whitespace":
+            matched = all(re.sub(r"[ \t]+", " ", doc_lines[i + j].strip()) == want[j] for j in range(size))
         elif mode == "jsx":
             matched = all(_normalize_jsx_line(doc_lines[i + j]) == want[j] for j in range(size))
         elif mode == "symbols":
@@ -376,15 +378,15 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     if needle == "":
         raise OpError(f"{what} block is empty")
 
+    err_prefix = "SEARCH" if what == "SEARCH" else what
+
     # ---- Tier 1: Exact match ----
     count = doc.count(needle)
     if count == 1:
         start = doc.index(needle)
         return MatchResult(start, start + len(needle), "", False, None)
     if count > 1:
-        raise OpError(
-            f"{what} text appears {count} times in {target} (exact match is ambiguous; add more context)"
-        )
+        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{count}")
 
     doc_lines = doc.split("\n")
 
@@ -394,6 +396,9 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     while want_raw and not want_raw[-1].strip():
         want_raw.pop()
 
+    if not want_raw:
+        raise OpError(f"{what} block is empty")
+
     # ---- Tier 2: Trailing whitespace tolerant ----
     want_trailing = [ln.rstrip("\r ") for ln in want_raw]
     spans = _match_line_spans(doc_lines, want_trailing, mode="trailing")
@@ -401,9 +406,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched ignoring trailing whitespace)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(
-            f"{what} text appears {len(spans)} times in {target} (ignoring trailing whitespace; ambiguous)"
-        )
+        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
 
     # ---- Tier 3: Indentation tolerant ----
     want_indent = [ln.strip() for ln in want_raw]
@@ -412,50 +415,31 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with indentation tolerance)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(
-            f"{what} text appears {len(spans)} times in {target} (ignoring indentation; ambiguous)"
-        )
+        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
 
-    # ---- Tier 4: JSX / Quote & Whitespace tolerant ----
+    # ---- Tier 4: Harmless whitespace normalization (spaces collapsed) ----
+    want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
+    spans = _match_line_spans(doc_lines, want_ws, mode="whitespace")
+    if len(spans) == 1:
+        start, end, i, last = spans[0]
+        return MatchResult(start, end, " (matched with whitespace normalization)", True, (i, last))
+    if len(spans) > 1:
+        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
+
+    # ---- Tier 5: JSX-aware line match ----
     want_jsx = [_normalize_jsx_line(ln) for ln in want_raw]
     spans = _match_line_spans(doc_lines, want_jsx, mode="jsx")
     if len(spans) == 1:
         start, end, i, last = spans[0]
-        return MatchResult(start, end, " (matched with JSX/quote tolerance)", True, (i, last))
+        return MatchResult(start, end, " (matched with JSX normalization)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(
-            f"{what} text appears {len(spans)} times in {target} (JSX/quote tolerant match is ambiguous)"
-        )
-
-    # ---- Tier 5: Symbol / Emoji / Unicode tolerant (strips non-ASCII, emojis, •, ➜) ----
-    want_symbols = [_strip_symbols_and_emojis(ln) for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_symbols, mode="symbols")
-    if len(spans) == 1:
-        start, end, i, last = spans[0]
-        return MatchResult(start, end, " (matched ignoring emojis and special symbols)", True, (i, last))
-    if len(spans) > 1:
-        raise OpError(
-            f"{what} text appears {len(spans)} times in {target} (symbol-tolerant match is ambiguous)"
-        )
-
-    # ---- Tier 6: High-Similarity Auto-Match (handles attribute drift & formatting) ----
-    sim_match = _find_high_similarity_match(doc, needle, threshold=0.88)
-    if sim_match is not None:
-        start_offset, end_offset, s_idx, e_idx, ratio = sim_match
-        pct = int(ratio * 100)
-        return MatchResult(
-            start_offset,
-            end_offset,
-            f" (matched with {pct}% similarity tolerance at lines {s_idx + 1}-{e_idx + 1})",
-            True,
-            (s_idx, e_idx),
-        )
+        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
 
     # ---- Diagnostic failure ----
     diagnostic = _find_closest_match(doc, needle)
     first = next((ln.strip() for ln in needle.split("\n") if ln.strip()), "")
     preview = first if len(first) <= 60 else first[:57] + "..."
-    raise OpError(f"{what} text not found in {target} (first line: {preview!r}){diagnostic}")
+    raise OpError(f"ERR|{err_prefix}_NOT_FOUND|{target} (first line: {preview!r}){diagnostic}")
 
 
 def _adjust_indentation(doc: str, line_range: tuple[int, int], search_text: str, replace_text: str, newline: str) -> str:
@@ -568,6 +552,136 @@ class Operation:
 # ============================================================
 # Parser
 # ============================================================
+
+def extract_plan(text: str) -> str:
+    """
+    Extract the executable code_exec plan block from an AI response.
+    Ignores conversational explanations, Markdown prose, and unrelated code blocks.
+
+    Supported formats:
+      1. ```code_exec ... ``` (or ````code_exec ... ```` or ~~~code_exec)
+      2. CODE_EXEC_PLAN ... END_CODE_EXEC_PLAN
+      3. Legacy response starting with THINK
+    """
+    sanitized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\u00a0", " ")
+    lines = sanitized.split("\n")
+
+    plans: list[str] = []
+    unclosed: list[str] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Format 2: CODE_EXEC_PLAN ... END_CODE_EXEC_PLAN
+        if stripped == "CODE_EXEC_PLAN":
+            i += 1
+            block_lines = []
+            found_end = False
+            while i < len(lines):
+                if lines[i].strip() == "END_CODE_EXEC_PLAN":
+                    found_end = True
+                    i += 1
+                    break
+                block_lines.append(lines[i])
+                i += 1
+            if found_end:
+                plans.append("\n".join(block_lines))
+            else:
+                unclosed.append("unclosed CODE_EXEC_PLAN block")
+            continue
+
+        # Format 1: Code fences (``` or ~~~)
+        fence_match = re.match(r"^[ \t]*(`{3,}|~{3,})(.*)$", line)
+        if fence_match:
+            fence_chars = fence_match.group(1)
+            fence_char = fence_chars[0]
+            fence_len = len(fence_chars)
+            info = fence_match.group(2).strip().lower()
+
+            is_code_exec = (
+                info == "code_exec"
+                or info == "code-exec"
+                or info.startswith("code_exec ")
+                or info.startswith("code_exec:")
+            )
+
+            i += 1
+            block_lines = []
+            found_end = False
+            content_depth = 0
+
+            while i < len(lines):
+                curr = lines[i]
+                curr_stripped = curr.strip()
+
+                # Track <<< / >>> blocks so nested ``` in content blocks don't close fence
+                if is_code_exec:
+                    if curr_stripped == "<<<":
+                        content_depth += 1
+                    elif curr_stripped == ">>>":
+                        if content_depth > 0:
+                            content_depth -= 1
+
+                if content_depth == 0:
+                    close_match = re.match(r"^[ \t]*(`{3,}|~{3,})[ \t]*$", curr)
+                    if close_match:
+                        c_chars = close_match.group(1)
+                        if c_chars[0] == fence_char and len(c_chars) >= fence_len:
+                            found_end = True
+                            i += 1
+                            break
+
+                if is_code_exec:
+                    block_lines.append(curr)
+                i += 1
+
+            if is_code_exec:
+                if found_end:
+                    plans.append("\n".join(block_lines))
+                else:
+                    unclosed.append("unclosed code_exec block")
+            continue
+
+        i += 1
+
+    if unclosed:
+        if len(plans) == 0:
+            raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
+        raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans) + len(unclosed)}")
+
+    if len(plans) == 1:
+        return plans[0]
+
+    if len(plans) > 1:
+        raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans)}")
+
+    # Format 3: Backward compatibility for legacy response starting with THINK
+    trimmed = sanitized.strip()
+    candidate = trimmed
+
+    # Strip single outer fence if the entire response is wrapped in ```text ... ```
+    m_wrap = re.match(r"^(`{3,}|~{3,})(?:[a-zA-Z0-9_-]*)\n(.*)\n\1$", trimmed, re.DOTALL)
+    if m_wrap:
+        candidate = m_wrap.group(2).strip()
+
+    cand_lines = [ln for ln in candidate.split("\n") if ln.strip()]
+    cand_idx = 0
+    while cand_idx < len(cand_lines) and cand_lines[cand_idx].strip().startswith("#"):
+        cand_idx += 1
+
+    if cand_idx < len(cand_lines) and cand_lines[cand_idx].strip() == "THINK":
+        has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
+        has_command = any(
+            re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
+            for ln in cand_lines
+        )
+        if has_end_think and has_command:
+            return candidate
+
+    raise OpError("ERR|PLAN_NOT_FOUND")
+
 
 COMMANDS = {
     "CREATE", "EDIT", "DELETE", "MOVE", "COPY", "RENAME", "MKDIR",
@@ -934,7 +1048,7 @@ def execute(op: Operation, fs) -> str | None:
     if command == "CREATE":
         path = safe_path(args[0], follow_leaf=False)
         if fs.lexists(path):
-            raise OpError(f"CREATE target already exists: {args[0]}")
+            raise OpError(f"ERR|CREATE_EXISTS|{args[0]}")
         text = op.data
         if text and not text.endswith("\n"):
             text += "\n"
@@ -944,7 +1058,7 @@ def execute(op: Operation, fs) -> str | None:
     if command in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
         path = safe_path(args[0])
         if not fs.is_file(path):
-            raise OpError(f"{command} target is not an existing file: {args[0]}")
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
 
         doc = fs.read(path)
         newline = newline_style(doc)
@@ -999,7 +1113,7 @@ def execute(op: Operation, fs) -> str | None:
     if command == "DELETE":
         path = safe_path(args[0], follow_leaf=False)
         if not fs.lexists(path):
-            raise OpError(f"DELETE target does not exist: {args[0]}")
+            raise OpError(f"ERR|DELETE_NOT_FOUND|{args[0]}")
         fs.delete(path)
         return f"Deleted {args[0]}"
 
@@ -1313,7 +1427,12 @@ def main(argv=None) -> int:
         return 0
 
     try:
-        operations = parse_operations(text)
+        plan_text = extract_plan(text)
+    except OpError as exc:
+        return fail(str(exc))
+
+    try:
+        operations = parse_operations(plan_text)
     except ValueError as exc:
         return fail(f"Could not parse instructions: {exc}")
 

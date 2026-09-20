@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+import unittest
+from code_exec import (
+    OpError,
+    Operation,
+    VirtualFS,
+    execute,
+    extract_plan,
+    find_unique,
+    parse_operations,
+    safe_path,
+)
+
+
+class TestCodeExecExtractionAndValidation(unittest.TestCase):
+    def test_normal_explanation_with_code_exec(self):
+        ai_response = (
+            "Here is the change you requested.\n\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Create sample file\n"
+            "END_THINK\n"
+            "CREATE sample.txt\n"
+            "<<<\n"
+            "hello world\n"
+            ">>>\n"
+            "```\n\n"
+            "Let me know if you need any adjustments!"
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "sample.txt")
+        self.assertEqual(ops[0].data, "hello world")
+
+    def test_markdown_with_unrelated_code_blocks(self):
+        ai_response = (
+            "# Code Update Summary\n\n"
+            "First, review the python snippet:\n"
+            "```python\n"
+            "def unused():\n"
+            "    return 'ignore me'\n"
+            "```\n\n"
+            "And here is the JSX component:\n"
+            "```jsx\n"
+            "export const Button = () => <button>Click</button>;\n"
+            "```\n\n"
+            "Here is the actual plan block to execute:\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Add config json\n"
+            "END_THINK\n"
+            "CREATE config.json\n"
+            "<<<\n"
+            "{\"enabled\": true}\n"
+            ">>>\n"
+            "```\n\n"
+            "All done!"
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "config.json")
+
+    def test_text_before_and_after_code_exec(self):
+        ai_response = (
+            "Paragraph 1 before code_exec.\n\n"
+            "Paragraph 2 before code_exec.\n\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Delete old file\n"
+            "END_THINK\n"
+            "DELETE temp.txt\n"
+            "```\n\n"
+            "Paragraph 1 after code_exec.\n"
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "DELETE")
+        self.assertEqual(ops[0].args[0], "temp.txt")
+
+    def test_code_exec_plan_format(self):
+        ai_response = (
+            "Using the alternative format:\n"
+            "CODE_EXEC_PLAN\n"
+            "THINK\n"
+            "Run via CODE_EXEC_PLAN delimiters\n"
+            "END_THINK\n"
+            "CREATE alt.txt\n"
+            "<<<\n"
+            "alternative content\n"
+            ">>>\n"
+            "END_CODE_EXEC_PLAN\n"
+            "Conclusion line."
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertEqual(ops[0].args[0], "alt.txt")
+        self.assertEqual(ops[0].data, "alternative content")
+
+    def test_legacy_plan_only_response(self):
+        raw_plan = (
+            "THINK\n"
+            "Direct legacy plan without wrapper\n"
+            "END_THINK\n"
+            "CREATE legacy.txt\n"
+            "<<<\n"
+            "legacy content\n"
+            ">>>\n"
+        )
+        plan = extract_plan(raw_plan)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "CREATE")
+
+        fenced = f"```text\n{raw_plan}```"
+        plan_fenced = extract_plan(fenced)
+        ops_fenced = parse_operations(plan_fenced)
+        self.assertEqual(len(ops_fenced), 1)
+        self.assertEqual(ops_fenced[0].command, "CREATE")
+
+    def test_no_plan(self):
+        ai_response = (
+            "Here is how you fix the bug:\n"
+            "Simply update the function definition in app.py.\n"
+            "```python\n"
+            "def foo():\n"
+            "    return True\n"
+            "```\n"
+        )
+        with self.assertRaises(OpError) as ctx:
+            extract_plan(ai_response)
+        self.assertIn("ERR|PLAN_NOT_FOUND", str(ctx.exception))
+
+    def test_multiple_plans(self):
+        ai_response = (
+            "Plan 1:\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Plan 1\n"
+            "END_THINK\n"
+            "DELETE first.txt\n"
+            "```\n\n"
+            "Plan 2:\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Plan 2\n"
+            "END_THINK\n"
+            "DELETE second.txt\n"
+            "```\n"
+        )
+        with self.assertRaises(OpError) as ctx:
+            extract_plan(ai_response)
+        self.assertIn("ERR|MULTIPLE_PLANS|2", str(ctx.exception))
+
+    def test_malformed_unclosed_code_exec_block(self):
+        ai_response = (
+            "Here is a truncated plan:\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Cut off\n"
+            "END_THINK\n"
+            "CREATE file.txt\n"
+            "<<<\n"
+            "some content\n"
+        )
+        with self.assertRaises(OpError) as ctx:
+            extract_plan(ai_response)
+        self.assertIn("ERR|PLAN_NOT_FOUND", str(ctx.exception))
+        self.assertIn("unclosed", str(ctx.exception).lower())
+
+    def test_existing_search_exact_match(self):
+        doc = "line 1\nline 2\nline 3\n"
+        needle = "line 2\n"
+        res = find_unique(doc, needle, "SEARCH", "sample.txt")
+        self.assertFalse(res.fuzzy)
+        self.assertEqual(res.start, 7)
+        self.assertEqual(res.end, 14)
+
+    def test_normalized_whitespace_search(self):
+        doc = "    <div className=\"panel\">\n        <span>Click me</span>\n    </div>"
+        needle = "<div className=\"panel\">\n    <span>Click me</span>\n</div>"
+        res = find_unique(doc, needle, "SEARCH", "panel.jsx")
+        self.assertTrue(res.fuzzy)
+        matched_text = doc[res.start:res.end]
+        self.assertEqual(matched_text, "    <div className=\"panel\">\n        <span>Click me</span>\n    </div>")
+
+    def test_ambiguous_search(self):
+        doc = "common_entry\nitem 1\ncommon_entry\nitem 2\n"
+        needle = "common_entry"
+        with self.assertRaises(OpError) as ctx:
+            find_unique(doc, needle, "SEARCH", "file.txt")
+        self.assertIn("ERR|SEARCH_AMBIGUOUS|file.txt|2", str(ctx.exception))
+
+    def test_create_existing_file(self):
+        vfs = VirtualFS()
+        vfs.write(safe_path("already_exists.txt", follow_leaf=False), "content\n")
+        op = Operation("CREATE", ("already_exists.txt",), "new content\n")
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|CREATE_EXISTS|already_exists.txt", str(ctx.exception))
+
+    def test_delete_nonexistent_file(self):
+        vfs = VirtualFS()
+        op = Operation("DELETE", ("does_not_exist.txt",))
+        with self.assertRaises(OpError) as ctx:
+            execute(op, vfs)
+        self.assertIn("ERR|DELETE_NOT_FOUND|does_not_exist.txt", str(ctx.exception))
+
+    def test_content_block_with_nested_backticks(self):
+        ai_response = (
+            "Here is the plan updating README:\n"
+            "```code_exec\n"
+            "THINK\n"
+            "Create markdown with internal fences\n"
+            "END_THINK\n"
+            "CREATE README.md\n"
+            "<<<\n"
+            "```python\n"
+            "print('nested')\n"
+            "```\n"
+            ">>>\n"
+            "COMMIT feat: update readme\n"
+            "```\n"
+            "Done."
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 2)
+        self.assertEqual(ops[0].command, "CREATE")
+        self.assertIn("```python", ops[0].data)
+        self.assertEqual(ops[1].command, "COMMIT")
+
+
+if __name__ == "__main__":
+    unittest.main()
