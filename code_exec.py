@@ -1202,6 +1202,8 @@ def main(argv=None) -> int:
             pass
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
+    parser.add_argument("action", nargs="?", default=None,
+                        help="Direct action: 'apply' or 'run' to execute plan immediately")
     parser.add_argument("-h", "--help", action="store_true",
                         help="Show interactive usage guide and options")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
@@ -1221,6 +1223,26 @@ def main(argv=None) -> int:
                         help=f"Seconds allowed per RUN command, 0 = no limit "
                              f"(default {DEFAULT_RUN_TIMEOUT})")
     args = parser.parse_args(argv)
+
+    # Launch interactive menu if run without arguments in an interactive terminal
+    is_interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
+    has_flags = any([args.help, args.prompt, args.file, args.dry_run, args.yes, args.no_run, args.no_commit])
+    if args.action is None and not has_flags and is_interactive:
+        choice = ui.interactive_menu(ROOT)
+        if choice in {"q", "quit", "exit", ""}:
+            return 0
+        if choice == "1":
+            args.action = "apply"
+        elif choice == "2":
+            args.dry_run = True
+            args.action = "apply"
+        elif choice == "3":
+            args.prompt = True
+        elif choice == "4":
+            args.help = True
+        else:
+            ui.error(f"Invalid option: {choice}")
+            return 1
 
     if args.help:
         ui.show_guide()

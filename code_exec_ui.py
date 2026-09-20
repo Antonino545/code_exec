@@ -169,7 +169,7 @@ class TerminalUI:
         _row(c.paint("How it works:", c.WHITE, bold=True))
         _row(f"  {c.paint('1.', c.CORAL)} Ask the AI to write a {c.paint('code_exec', c.CYAN)} plan block.")
         _row(f"  {c.paint('2.', c.CORAL)} Copy the plan to your clipboard ({c.paint('⌘C', c.AMBER)}).")
-        _row(f"  {c.paint('3.', c.CORAL)} Run {c.paint('code-exec', c.GREEN, bold=True)} in your project folder to apply.")
+        _row(f"  {c.paint('3.', c.CORAL)} Run {c.paint('code-exec', c.GREEN, bold=True)} (or {c.paint('code-exec apply', c.GREEN)}) to execute.")
         _row()
         _row(c.paint("Supported Instructions:", c.WHITE, bold=True))
         _row(f"  {c.paint('CREATE', c.GREEN, bold=True):<18} {c.paint('path', c.SLATE)} <<< content >>>")
@@ -179,7 +179,9 @@ class TerminalUI:
         _row(f"  {c.paint('RUN', c.CORAL, bold=True):<18} {c.paint('shell command', c.SLATE)}")
         _row(f"  {c.paint('COMMIT', c.CYAN, bold=True):<18} {c.paint('commit message', c.SLATE)}")
         _row()
-        _row(c.paint("Common Options:", c.WHITE, bold=True))
+        _row(c.paint("Common Options & Commands:", c.WHITE, bold=True))
+        _row(f"  {c.paint('code-exec', c.WHITE):<18} Open interactive launcher menu")
+        _row(f"  {c.paint('code-exec apply', c.WHITE):<18} Apply plan directly from clipboard")
         _row(f"  {c.paint('--prompt, -p', c.CYAN):<18} Copy AI instructions prompt to clipboard")
         _row(f"  {c.paint('--dry-run', c.CYAN):<18} Validate operations without modifying files")
         _row(f"  {c.paint('--yes', c.CYAN):<18} Apply changes directly without confirmation")
@@ -312,6 +314,38 @@ class TerminalUI:
         print(f"│ {c.paint(msg2, c.SLATE)}{' ' * pad2} │")
         print(f"│ {c.paint(msg3, c.AMBER)}{' ' * pad3} │")
         print(f"{c.paint(bot, c.SLATE)}\n")
+
+    def interactive_menu(self, root: Path) -> str:
+        c = self.palette
+        w = self._width()
+        inner_w = w - 4
+
+        self.header(root)
+
+        title = c.paint(" Menu ", c.CORAL, bold=True)
+        top = f"╭─{title}{'─' * max(0, inner_w - _vlen(title) + 1)}╮"
+        bot = f"╰{'─' * (w - 2)}╯"
+
+        def _row(text: str = "") -> None:
+            pad = max(0, inner_w - _vlen(text))
+            print(f"│ {text}{' ' * pad} │")
+
+        print(c.paint(top, c.SLATE))
+        _row()
+        _row(f"  {c.paint('1.', c.CORAL, bold=True)} {c.paint('Apply plan', c.WHITE, bold=True)} from clipboard")
+        _row(f"  {c.paint('2.', c.CORAL, bold=True)} {c.paint('Dry-run', c.WHITE, bold=True)} validate plan from clipboard")
+        _row(f"  {c.paint('3.', c.CORAL, bold=True)} {c.paint('Copy AI prompt', c.WHITE, bold=True)} instructions to clipboard ({c.paint('-p', c.CYAN)})")
+        _row(f"  {c.paint('4.', c.CORAL, bold=True)} {c.paint('Quick guide', c.WHITE, bold=True)} & syntax reference ({c.paint('-h', c.CYAN)})")
+        _row(f"  {c.paint('q.', c.SLATE, bold=True)} Exit")
+        _row()
+        print(f"{c.paint(bot, c.SLATE)}\n")
+
+        prompt = c.paint("❯ Choose an option [1/2/3/4/q]: ", c.CORAL, bold=True)
+        try:
+            return input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "q"
 
     def prompt_commit(self, default_msg: str) -> bool:
         c = self.palette

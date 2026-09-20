@@ -8,6 +8,10 @@ When asked to modify/create/delete/move files or run commands, **always output a
 * **Explanations and context**: Place all conversational explanations, analysis, diagnoses, and rationale **outside** the code block as normal Markdown prose.
 * **Executable code block**: Enclose **only** the executable plan (starting with `THINK` and ending with `COMMIT` or the last command) inside the ` ```text ` block so the user can copy the plan directly with a single click.
 
+### Running Plans
+* **Interactive menu**: Typing `code-exec` in the terminal opens an interactive menu.
+* **Direct execution**: Typing `code-exec apply` (or choosing option 1) reads and applies the clipboard plan.
+
 ## Format
 
 ```text
