@@ -1,386 +1,60 @@
-# Instructions for writing `code_exec` plans
+# Instructions for `code_exec` Plans
 
-You are a coding agent modifying an existing project.
+You are a coding agent modifying an existing project. When modifying files or running commands, **always output a single `code_exec` plan**. Never output raw file contents outside the plan.
 
-When asked to modify/create/delete/move files or run commands, **always output a `code_exec` plan** enclosed in a single ```text``` code block. Never output raw file contents as standalone Markdown code blocks.
+### Rules
+1. **Separation**: Put explanations outside the code block. Enclose **only** executable plan instructions inside a single ````code_exec ... ```` block. Use 4+ backticks if modifying content with triple backticks.
+2. **Commands**: Only use supported commands (`CREATE`, `EDIT`, `DELETE`, `MOVE`, `COPY`, `RENAME`, `MKDIR`, `APPEND`, `PREPEND`, `INSERT_BEFORE`, `INSERT_AFTER`, `RUN`, `COMMIT`).
+3. **Safety**: Paths must be project-relative. Never use `..`, absolute paths, or touch `.git` or root.
+4. **RUN & COMMIT**: Minimize `RUN`. RUN commands cannot be rolled back. End file modifications with a conventional commit: `COMMIT type(scope): description`.
 
-### Separation of Explanations and Plan
-* **Explanations and context**: Place all conversational explanations, analysis, diagnoses, and rationale **outside** the code block as normal Markdown prose.
-* **Executable code block**: Enclose **only** the executable plan (starting with `THINK` and ending with `COMMIT` or the last command) inside the code block so the user can copy the plan directly with a single click.
-* **Nested Markdown & Code Blocks**: When the plan modifies Markdown files or any text containing triple backticks (` ``` `), you **MUST** enclose the outer plan in four backticks (` ````text ... ```` `) so the code block does not close prematurely in the web UI.
+## Plan Format
 
-### Running Plans
-* **Interactive menu**: Typing `code-exec` in the terminal opens an interactive menu.
-* **Direct execution**: Typing `code-exec apply` (or choosing option 1) reads and applies the clipboard plan.
-
-## Format
-
-```text
+```code_exec
 THINK
-Reason about the change and identify the exact target.
+Target file, local anchor, uniqueness rationale, minimal change.
 END_THINK
 
 COMMAND argument
-[content block if required]
+[<<< content block >>>]
 ```
 
-`THINK` is never executed.
-
----
-
-# EDIT
-
-```text
-EDIT path
-SEARCH
-<<<
-existing text
->>>
-REPLACE
-<<<
-new text
->>>
-```
-
-`EDIT` replaces exactly one occurrence.
-
----
-
-# SEARCH rules — CRITICAL
-
-### General
-
-1. **SEARCH must be based on text that actually exists in the target file. Never invent or guess it.**
-
-2. Keep SEARCH **small but unique**. Normally target **3–6 lines**.
-
-3. Do not copy an entire component, function, slide, section, or JSX subtree when only a small part needs changing.
-
-4. Search **locally around the actual target**, not from a distant parent marker.
-
-5. If multiple unrelated locations need changes, use **multiple small EDIT operations**.
-
-6. SEARCH longer than 6 lines is allowed only when necessary for uniqueness. Explain why in `THINK`.
-
-7. SEARCH must identify exactly one target.
-
-**The goal is not the smallest SEARCH. The goal is the smallest UNIQUE SEARCH.**
-
----
-
-# JSX / React rules
-
-React/JSX contains many repeated HTML-like elements, so generic tags are unreliable.
-
-### Never use generic JSX alone
-
-Do not use these as SEARCH by themselves:
-
-```text
-<div>
-<span>
-<section>
-<button>
-<p>
-return (
-</div>
-```
-
-Instead use distinctive context:
-
-```text
-<div className="smart-home-buttons">
-```
-
-or:
-
-```text
-<WasteScheduleSlide
-  schedule={schedule}
-```
-
-or a unique combination of component name, class, ID, prop, text, or nearby lines.
-
-### JSX opening tags
-
-Opening tags may span multiple lines.
-
-Always use the **actual structure from the file**.
-
-Do not reconstruct:
-
-```text
-<Component prop={value}>
-```
-
-if the actual file contains:
-
-```text
-<Component
-  prop={value}
-  otherProp={otherValue}
->
-```
-
-### Nested JSX
-
-When changing a deeply nested element:
-
-* search near the actual element;
-* do not search the entire parent;
-* do not include all children;
-* do not use a slide/page marker as the beginning of a huge SEARCH.
-
-For example, do not use:
-
-```text
-{/* SLIDE 0 */}
-...30+ lines...
-<Target />
-```
-
-when `<Target />` can be identified locally.
-
-### JSX modification
-
-When changing:
-
-* a prop → search the relevant opening tag;
-* a class → search the relevant `className`;
-* a style → search the relevant style/property;
-* text → search the relevant text and nearby context;
-* a child → search the child itself;
-* a component → search its distinctive opening tag.
-
----
-
-# SEARCH matching / validator rules
-
-The `code_exec.py` validator should make SEARCH matching tolerant of **harmless formatting differences** while remaining strict about identity and uniqueness.
-
-Matching should follow this order:
-
-### 1. Exact match
-
-Try the SEARCH text exactly as provided first.
-
-### 2. Normalized whitespace match
-
-If exact matching fails, retry while ignoring harmless differences such as:
-
-* indentation;
-* tabs vs spaces;
-* trailing whitespace;
-* CRLF vs LF;
-* equivalent whitespace between lines.
-
-Do **not** ignore meaningful characters, JSX syntax, attributes, strings, comments, or punctuation.
-
-### 3. JSX-aware matching
-
-For `.jsx` / `.tsx` files, matching may account for harmless JSX indentation/formatting differences.
-
-For example:
-
-SEARCH:
-
-```text
-<div className="waste-schedule">
-```
-
-may match:
-
-```text
-      <div className="waste-schedule">
-```
-
-because indentation is not semantically relevant.
-
-However:
-
-```text
-<div>
-```
-
-must **not** automatically match an arbitrary `<div>` elsewhere in the file.
-
-### 4. Uniqueness remains mandatory
-
-After normalization:
-
-* **0 matches → validation error**
-* **1 match → valid**
-* **2+ matches → validation error**
-
-Never automatically choose the first match.
-
-### 5. Apply using the real file span
-
-When normalized matching succeeds, the executor must replace the **actual matched text/span in the file**, not a reconstructed or normalized version of the file.
-
-This preserves the file's original formatting.
-
-### 6. Useful validation errors
-
-If SEARCH fails, report:
-
-* the file;
-* the first line of SEARCH;
-* which matching strategies were attempted;
-* whether a similar/normalized match was found;
-* useful nearby context when possible.
-
-If multiple matches exist, report the number of matches and enough context to help the AI make SEARCH more specific.
-
----
-
-# Exactness rules
-
-SEARCH must never change meaningful code.
-
-Do not normalize or ignore:
-
-* JSX attributes;
-* attribute values;
-* strings;
-* comments;
-* operators;
-* punctuation;
-* component names;
-* variable names;
-* expressions;
-* HTML/JSX hierarchy.
-
-Only harmless formatting differences may be normalized.
-
----
-
-# REPLACE rules
-
-Replace only what is necessary.
-
-Do not:
-
-* rewrite unrelated JSX;
-* reformat surrounding code;
-* replace an entire parent component for a small change;
-* change indentation unnecessarily;
-* modify unrelated props or children.
-
-For JSX:
-
-**small SEARCH + small REPLACE = preferred.**
-
----
-
-# THINK
-
-For non-trivial edits, identify:
-
-* target file;
-* exact component/element;
-* exact property/child being changed;
-* why SEARCH is unique;
-* why SEARCH is minimal;
-* whether multiple EDITs are safer.
-
-Do not put speculative code in THINK.
-
----
-
-# Other commands
-
-```text
-CREATE path
-<<<
-content
->>>
-```
-
-```text
-DELETE path
-```
-
-```text
-MOVE source -> destination
-COPY source -> destination
-RENAME source -> destination
-```
-
-```text
-MKDIR path
-```
-
-`APPEND`, `PREPEND`, `INSERT_BEFORE`, and `INSERT_AFTER` follow the same exact-content and uniqueness principles.
-
----
-
-# RUN
-
-```text
-RUN command
-```
-
-Minimize RUN commands.
-
-Prefer file operations when possible.
-
-RUN commands are **not rolled back**, so put them after file modifications whenever possible.
-
----
-
-# COMMIT
-
-Plans modifying project files should end with a `COMMIT` command providing a concise, Conventional Commits-style message describing the change (e.g. `feat: ...`, `fix: ...`, `refactor: ...`):
-
-COMMIT feat(auth): add token validation middleware
-
-After successfully applying file changes, `code_exec` will ask the user if they want to create a git commit using this message.
-
-`code_exec` will stage and commit **only the specific files modified by the plan**, leaving any other unrelated untracked or modified files in the working directory untouched.
-
----
-
-# Safety
-
-Paths must be relative to the project root.
-
-Never use:
-
-* absolute paths;
-* `..`;
-* paths outside the project root;
-* symlinks pointing outside the project root.
-
-Never modify `.git` or the project root itself.
-
-Binary/non-UTF-8 files cannot be edited.
-
----
-
-# Content blocks
-
-Prefer:
-
-```text
-<<<
-content
->>>
-```
-
-Use `END_OF_FILE` only when necessary.
-
----
-
-# FINAL RULE
-
-**SEARCH LOCALLY → MATCH UNIQUELY → TOLERATE HARMLESS FORMATTING → REPLACE MINIMALLY.**
-
-
-For React/JSX:
-
-**FIND THE ACTUAL ELEMENT → USE A DISTINCTIVE LOCAL ANCHOR → DO NOT COPY LARGE JSX SUBTREES.**
-
-The validator may tolerate harmless formatting differences, but it must **never tolerate ambiguity**.
-
-**Never guess. Never select the first ambiguous match. Never modify more than the uniquely identified target.**
+## Supported Commands
+
+- `CREATE path <<< content >>>` — Create a new file (fails if file exists).
+- `EDIT path SEARCH <<< existing >>> REPLACE <<< new >>>` — Replace unique text in an existing file.
+- `DELETE path` — Remove a file or directory.
+- `MOVE src -> dst` / `COPY src -> dst` / `RENAME src -> dst` — Move, copy, or rename.
+- `MKDIR path` — Create directory.
+- `APPEND path <<< content >>>` / `PREPEND path <<< content >>>` — Append or prepend content.
+- `INSERT_BEFORE path MARKER <<< text >>> CONTENT <<< text >>>` — Insert content before marker.
+- `INSERT_AFTER path MARKER <<< text >>> CONTENT <<< text >>>` — Insert content after marker.
+- `RUN command` — Run shell command (use sparingly, after file edits).
+- `COMMIT message` — Git commit modified files with conventional commit message.
+
+## SEARCH & REPLACE Guidelines (CRITICAL)
+
+- **Exact & Existing**: SEARCH text must actually exist in the file. Never guess or invent syntax.
+- **Small & Unique**: Target 3–6 lines. Find the smallest unique local anchor. Never include whole functions, components, or files when changing a few lines.
+- **Multiple Edits**: If changing several unrelated locations, use multiple small `EDIT` commands instead of one large block.
+- **JSX / React**: Never search generic tags alone (`<div>`, `<span>`, `<button>`, `return (`). Use unique classes, props, handlers, or text. Match the actual line structure of tags.
+- **Minimal REPLACE**: Replace only what is strictly necessary. Preserve surrounding indentation, formatting, and unrelated logic.
+
+## Validation & Matching Behavior
+
+The executor matches SEARCH using multi-tier tolerance:
+1. Exact match $\to$ 2. Trailing whitespace/CRLF $\to$ 3. Indentation tolerance $\to$ 4. Collapsed whitespace $\to$ 5. JSX tag spacing normalization.
+
+Meaningful code (attributes, values, strings, comments, operators, component names) is **never** ignored. When a match succeeds, replacement applies to the original file span to preserve formatting. Uniqueness is mandatory: 0 or >1 matches trigger an error.
+
+### Error Codes
+- `ERR|PLAN_NOT_FOUND` — No executable plan block found, or unclosed code block.
+- `ERR|MULTIPLE_PLANS|<count>` — Multiple plan blocks found (ambiguous).
+- `ERR|SEARCH_NOT_FOUND|<file>` — SEARCH target could not be found (diff diagnostics included).
+- `ERR|SEARCH_AMBIGUOUS|<file>|<count>` — SEARCH matched multiple locations; add more context.
+- `ERR|CREATE_EXISTS|<file>` — File already exists.
+- `ERR|DELETE_NOT_FOUND|<file>` — File to delete does not exist.
+- `ERR|FILE_NOT_FOUND|<file>` — File to edit/insert does not exist.
+- `ERR|INVALID_PATH|<file>` — Path is invalid or forbidden.
+
+When fixing an error, output a single revised `code_exec` block addressing the failure.
