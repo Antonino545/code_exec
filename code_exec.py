@@ -22,6 +22,7 @@ lines wrapped in `<<<` / `>>>`.
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import signal
 import subprocess
@@ -41,6 +42,7 @@ from code_exec_types import (
     PROTECTED_FILE_EXACT,
     PROTECTED_NAMES,
     PROTECTED_SUFFIXES,
+    SHELL_CHAINING_OPERATORS,
     CommandFailed,
     MatchResult,
     OpError,
@@ -80,6 +82,7 @@ from code_exec_parser import (
 
 # Re-export filesystems and path/text helpers
 from code_exec_fs import (
+    BACKUP_ROOT,
     NEW_FILE_MODE,
     RealFS,
     VirtualFS,
@@ -89,6 +92,7 @@ from code_exec_fs import (
     read_text,
     rel,
     safe_path,
+    undo_last_run,
     with_newlines,
 )
 
@@ -211,6 +215,73 @@ def check_paths(op: Operation) -> None:
         return
     for value in op.args:
         safe_path(value, follow_leaf=False)
+
+
+def generate_plan_diff(operations: list[Operation]) -> str:
+    """Generates unified diff text for all planned file modifications."""
+    vfs = VirtualFS()
+    diff_lines = []
+
+    for op in operations:
+        cmd = op.command
+        if cmd == "CREATE":
+            target = op.args[0]
+            new_text = op.data or ""
+            diff = difflib.unified_diff(
+                [],
+                new_text.splitlines(keepends=True),
+                fromfile="/dev/null",
+                tofile=f"b/{target}",
+            )
+            diff_lines.extend(diff)
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
+        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
+            target = op.args[0]
+            try:
+                target_path = safe_path(target)
+                old_text = ""
+                if vfs.lexists(target_path):
+                    old_text = vfs.read(target_path)
+                elif target_path.is_file():
+                    old_text = read_text(target_path)
+                execute(op, vfs)
+                new_text = vfs.read(target_path)
+                diff = difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
+                    fromfile=f"a/{target}",
+                    tofile=f"b/{target}",
+                )
+                diff_lines.extend(diff)
+            except Exception:
+                pass
+        elif cmd == "DELETE":
+            target = op.args[0]
+            try:
+                target_path = safe_path(target)
+                old_text = ""
+                if target_path.is_file():
+                    old_text = read_text(target_path)
+                diff = difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    [],
+                    fromfile=f"a/{target}",
+                    tofile="/dev/null",
+                )
+                diff_lines.extend(diff)
+                execute(op, vfs)
+            except Exception:
+                pass
+        elif cmd in {"MOVE", "RENAME"}:
+            diff_lines.append(f"--- a/{op.args[0]}\n+++ b/{op.args[1]}\n@@ move/rename @@\n")
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
+    return "".join(diff_lines)
 
 
 def preflight(operations: list[Operation]) -> tuple[str | None, int]:
@@ -360,7 +431,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
             fs.cleanup()
         return 1
 
-    fs.cleanup()
+    fs.save_backup_manifest()
     has_git = (ROOT / ".git").exists()
     ui.done(has_git=has_git)
 
@@ -386,13 +457,15 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
-                        help="Direct action: 'apply', 'run', 'theme', or 'update'")
+                        help="Direct action: 'apply', 'undo', 'theme', or 'update'")
     parser.add_argument("subarg", nargs="?", default=None,
                         help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
                         help="Show interactive usage guide and options")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
+    parser.add_argument("--diff", action="store_true",
+                        help="Display unified diff of file changes before applying")
     parser.add_argument("--clipboard", action="store_true",
                         help="Read instructions from clipboard (the default)")
     parser.add_argument("--file", help="Read instructions from a file ('-' for stdin)")
@@ -423,6 +496,12 @@ def main(argv=None) -> int:
     elif args.action in {"5", "update"}:
         from code_exec_updater import update_code_exec
         return 0 if update_code_exec() else 1
+    elif args.action in {"6", "undo"}:
+        success, msg = undo_last_run()
+        if success:
+            print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
+            return 0
+        return fail(msg)
     elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
         print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
@@ -463,6 +542,12 @@ def main(argv=None) -> int:
         elif choice in {"5", "u", "update"}:
             from code_exec_updater import update_code_exec
             return 0 if update_code_exec() else 1
+        elif choice in {"6", "undo"}:
+            success, msg = undo_last_run()
+            if success:
+                print(ui.palette.paint(f"\n    {msg}\n", ui.palette.GREEN, bold=True))
+                return 0
+            return fail(msg)
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
@@ -523,12 +608,16 @@ def main(argv=None) -> int:
     ui.header(ROOT)
     ui.show_plan(operations, reason, deferred)
 
+    diff_text = generate_plan_diff(operations)
+    if args.diff:
+        ui.show_diff(diff_text)
+
     if args.dry_run:
         ui.dry_run()
         return 0
 
     if not args.yes:
-        if not ui.confirm():
+        if not ui.confirm(diff_text=diff_text):
             ui.cancelled()
             return 0
 

@@ -16,29 +16,43 @@ A deterministic, atomic local code executor and guardrailed runtime designed for
 ---
 
 ## Key Highlights
-
 - **Full AI Response Extraction**: Copy the *entire* conversational response. `code-exec` extracts the executable ````code_exec```` block and automatically ignores conversational prose, markdown headers, and unrelated code snippets.
-- **Sandboxed Execution & Whitelist**: Whitelists safe verification runners (`pytest`, `unittest`, `npm test`, `cargo test`, `ruff`). Demands interactive user approval and runs unvetted scripts inside an OS network-isolated sandbox (`sandbox-exec` on macOS, `unshare` on Linux).
+- **Sandboxed Execution & Guardrails**: Whitelists safe verification runners (`pytest`, `unittest`, `npm test`, `cargo test`, `ruff`). Demands interactive confirmation for unvetted scripts or chained shell commands (`&&`, `;`, `|`), isolating unvetted runs with network restrictions (`sandbox-exec` on macOS, `unshare` on Linux).
+- **Persistent Rollback (`undo`)**: Retains project-local transaction journals and file snapshots under `.code_exec/backups/`, enabling full rollback via `code-exec undo`.
+- **Pre-Execution Diff Preview**: Inspect formatted unified diffs before confirming with `--diff` or by pressing `v` at the confirmation prompt.
 - **Sensitive Credential Protection**: Blocks accidental modification or deletion of secrets, environment files, and CI workflows (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.github/workflows/*`).
 - **Atomic Consistency Checks**: Catches conflicting or duplicate file modifications in a plan before touching disk (e.g., duplicate `CREATE` commands or `EDIT` after `DELETE`).
-- **Interactive TUI & Diagnostic Cards**: Claude Code-inspired ASCII banner, responsive boxed menus, colorized diff visualizer, and machine-readable error cards (`ERR|...`).
-- **Tolerant Search & Replace**: Multi-tier matching handles indentation variations, collapsed whitespace, CRLF vs LF, and JSX tag formatting while preserving original code formatting.
+- **Interactive TUI & Diagnostic Cards**: Claude Code-inspired typography, responsive boxed menus, colorized diff visualizer, and machine-readable error cards (`ERR|...`).
+- **Tolerant Search & Replace**: Multi-tier matching handles indentation variations, collapsed whitespace, CRLF vs LF, and JSX tag formatting without newline drift.
 - **Scoped Git Commits**: Automatically stages and commits *only* the specific files modified by the plan, leaving other untracked or modified files in your repo untouched.
 
 ---
 
 ## Installation & Global Setup
 
-### macOS
+### Recommended: Install via pipx / uv (Standard Packaging)
+`code-exec` provides a standard `pyproject.toml` package configuration. You can install it globally with:
 
-#### Option 1: Global Launcher Script (Recommended)
+```bash
+# Using pipx (isolated global CLI)
+pipx install .
+
+# Or using uv
+uv tool install .
+
+# Or editable development install
+pip install -e .
+```
+
+### Alternative: Shell Launcher Scripts
+
+#### macOS
 Create a launcher in `/usr/local/bin` (replace `/path/to/code_exec` with the absolute path to your repo):
 ```zsh
 sudo tee /usr/local/bin/code-exec << 'EOF'
 #!/usr/bin/env zsh
 exec python3 "/path/to/code_exec/code_exec.py" "$@"
 EOF
-
 sudo chmod +x /usr/local/bin/code-exec
 ```
 
@@ -123,6 +137,12 @@ You can bypass the menu for instant automation:
 ```zsh
 # Apply plan directly from clipboard
 code-exec apply
+
+# Inspect proposed unified diff before execution
+code-exec apply --diff
+
+# Revert the most recently applied plan
+code-exec undo
 
 # Validate plan without touching files
 code-exec --dry-run

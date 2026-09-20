@@ -253,6 +253,11 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             validate_run_command("python3 -c 'import os'")
         self.assertIn("ERR|FORBIDDEN_COMMAND", str(ctx.exception))
 
+        # Whitelisted commands with shell operators must require interactive confirmation
+        self.assertTrue(validate_run_command("pytest tests/ && echo ok"))
+        self.assertTrue(validate_run_command("cargo test; ls"))
+        self.assertTrue(validate_run_command("npm test | cat"))
+
         # Forbidden dangerous commands fail
         with self.assertRaises(OpError) as ctx:
             validate_run_command("rm -rf /")
@@ -436,6 +441,42 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         self.assertEqual(ops[0].command, "CREATE")
         self.assertIn("```python", ops[0].data)
         self.assertEqual(ops[1].command, "COMMIT")
+
+    def test_edit_preserves_single_trailing_newline(self):
+        vfs = VirtualFS()
+        test_file = ROOT / "test_newline_drift.txt"
+        vfs.write(test_file, "line 1\nline 2: to replace\nline 3\n")
+        op = Operation(
+            "EDIT",
+            ("test_newline_drift.txt",),
+            "line 2: to replace\n",
+            "line 2: replaced\n",
+        )
+        execute(op, vfs)
+        self.assertEqual(vfs.read(test_file), "line 1\nline 2: replaced\nline 3\n")
+
+    def test_generate_plan_diff(self):
+        from code_exec import generate_plan_diff
+        ops = [Operation("CREATE", ("sample_diff.txt",), "first line\nsecond line\n")]
+        diff = generate_plan_diff(ops)
+        self.assertIn("+first line", diff)
+        self.assertIn("+second line", diff)
+
+    def test_undo_functionality(self):
+        from code_exec import undo_last_run, apply_plan
+        target = ROOT / "test_undo_target.txt"
+        target.write_text("v1 content\n", encoding="utf-8")
+        try:
+            ops = [Operation("EDIT", ("test_undo_target.txt",), "v1 content\n", "v2 content\n")]
+            res = apply_plan(ops, timeout=60, no_commit=True, auto_commit=True)
+            self.assertEqual(res, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "v2 content\n")
+            success, msg = undo_last_run()
+            self.assertTrue(success)
+            self.assertEqual(target.read_text(encoding="utf-8"), "v1 content\n")
+        finally:
+            if target.exists():
+                target.unlink()
 
 
 if __name__ == "__main__":

@@ -31,7 +31,9 @@ def _strip_symbols_and_emojis(line: str) -> str:
     return " ".join(s.split())
 
 
-def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[tuple[int, int, int, int]]:
+def _match_line_spans(
+    doc_lines: list[str], want: list[str], mode: str, capture_newline: bool = False
+) -> list[tuple[int, int, int, int]]:
     """
     Find matching line spans across various normalization modes.
     Returns list of (start_char_offset, end_char_offset, start_line_idx, end_line_idx).
@@ -47,7 +49,6 @@ def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[
 
     size = len(want)
     spans = []
-
     for i in range(len(doc_lines) - size + 1):
         matched = False
         if mode == "trailing":
@@ -63,15 +64,20 @@ def _match_line_spans(doc_lines: list[str], want: list[str], mode: str) -> list[
 
         if matched:
             last = i + size - 1
-            tail = doc_lines[last]
-            if tail.endswith("\r"):
-                tail = tail[:-1]
-            spans.append((offsets[i], offsets[last] + len(tail), i, last))
-
+            if capture_newline and last + 1 < len(offsets):
+                end_pos = offsets[last + 1]
+            else:
+                tail = doc_lines[last]
+                if tail.endswith("\r"):
+                    tail = tail[:-1]
+                end_pos = offsets[last] + len(tail)
+            spans.append((offsets[i], end_pos, i, last))
     return spans
 
 
-def _find_high_similarity_match(doc: str, needle: str, threshold: float = 0.88) -> tuple[int, int, int, int, float] | None:
+def _find_high_similarity_match(
+    doc: str, needle: str, threshold: float = 0.88, capture_newline: bool = False
+) -> tuple[int, int, int, int, float] | None:
     """
     Locates a uniquely matching line block with >= threshold structural similarity,
     ignoring emojis, symbols, and minor attribute drifts.
@@ -123,10 +129,13 @@ def _find_high_similarity_match(doc: str, needle: str, threshold: float = 0.88) 
             return None
 
     start_offset = offsets[best_start]
-    tail = doc_lines[best_end]
-    if tail.endswith("\r"):
-        tail = tail[:-1]
-    end_offset = offsets[best_end] + len(tail)
+    if capture_newline and best_end + 1 < len(offsets):
+        end_offset = offsets[best_end + 1]
+    else:
+        tail = doc_lines[best_end]
+        if tail.endswith("\r"):
+            tail = tail[:-1]
+        end_offset = offsets[best_end] + len(tail)
     return (start_offset, end_offset, best_start, best_end, best_r)
 
 
@@ -241,9 +250,11 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     if not want_raw:
         raise OpError(f"{what} block is empty")
 
+    capture_nl = needle.endswith("\n")
+
     # ---- Tier 2: Trailing whitespace tolerant ----
     want_trailing = [ln.rstrip("\r ") for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_trailing, mode="trailing")
+    spans = _match_line_spans(doc_lines, want_trailing, mode="trailing", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched ignoring trailing whitespace)", True, (i, last))
@@ -252,7 +263,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 3: Indentation tolerant ----
     want_indent = [ln.strip() for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_indent, mode="indent")
+    spans = _match_line_spans(doc_lines, want_indent, mode="indent", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with indentation tolerance)", True, (i, last))
@@ -261,7 +272,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 4: Harmless whitespace normalization (spaces collapsed) ----
     want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_ws, mode="whitespace")
+    spans = _match_line_spans(doc_lines, want_ws, mode="whitespace", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with whitespace normalization)", True, (i, last))
@@ -270,7 +281,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     # ---- Tier 5: JSX-aware line match ----
     want_jsx = [_normalize_jsx_line(ln) for ln in want_raw]
-    spans = _match_line_spans(doc_lines, want_jsx, mode="jsx")
+    spans = _match_line_spans(doc_lines, want_jsx, mode="jsx", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with JSX normalization)", True, (i, last))
@@ -278,7 +289,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
 
     # ---- Tier 6: High-similarity fuzzy match (>= 90%) ----
-    fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90)
+    fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90, capture_newline=capture_nl)
     if fuzzy is not None:
         start, end, s_line, e_line, sim = fuzzy
         pct = int(sim * 100)

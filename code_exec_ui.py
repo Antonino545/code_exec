@@ -107,9 +107,9 @@ class TerminalUI:
     def __init__(self):
         self.palette = TerminalPalette()
 
-    def _width(self) -> int:
+    def _width(self, max_cols: int = 120) -> int:
         cols = shutil.get_terminal_size((80, 24)).columns
-        return min(max(cols - 4, 58), 86)
+        return min(max(cols - 4, 58), max_cols)
 
     @staticmethod
     def _line_count(text: str | None) -> int:
@@ -196,8 +196,10 @@ class TerminalUI:
         _row(c.paint("CLI Options & Commands:", c.WHITE, bold=True))
         _row(f"  {c.paint('code-exec', c.WHITE):<18} Open interactive launcher menu")
         _row(f"  {c.paint('code-exec apply', c.WHITE):<18} Apply plan directly from clipboard")
+        _row(f"  {c.paint('code-exec undo', c.WHITE):<18} Revert changes made by the last plan")
         _row(f"  {c.paint('code-exec update', c.WHITE):<18} Check and install latest version from GitHub")
         _row(f"  {c.paint('code-exec theme <name>', c.WHITE):<18} Change terminal color theme")
+        _row(f"  {c.paint('--diff', c.CYAN):<18} Display unified diff before applying changes")
         _row(f"  {c.paint('--prompt, -p', c.CYAN):<18} Copy AI instructions prompt to clipboard")
         _row(f"  {c.paint('--dry-run', c.CYAN):<18} Validate operations without modifying files")
         _row(f"  {c.paint('--yes', c.CYAN):<18} Apply changes directly without confirmation")
@@ -220,7 +222,7 @@ class TerminalUI:
         print()
         for line in art:
             print(c.paint(line, c.CORAL, bold=True))
-        print(f"  {c.paint('Local Deterministic Coding Agent', c.SLATE)}  {c.paint('v1.2', c.CYAN)}")
+        print(f"  {c.paint('Local Deterministic Coding Agent', c.SLATE)}  {c.paint('v1.3', c.CYAN)}")
         print()
 
     def header(self, root: Path) -> None:
@@ -309,15 +311,48 @@ class TerminalUI:
         pad = max(0, inner_w - _vlen(content))
         print(f"│ {content}{' ' * pad} │", flush=True)
 
-    def confirm(self) -> bool:
+    def confirm(self, diff_text: str | None = None) -> bool:
         c = self.palette
-        prompt = c.paint("❯ Apply these changes? [y/N]: ", c.CORAL, bold=True)
-        try:
-            answer = input(prompt).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return False
-        return answer in {"y", "yes"}
+        while True:
+            hint = " [y/N/v] (v: view diff): " if diff_text else " [y/N]: "
+            prompt = c.paint(f"  Apply these changes?{hint}", c.CORAL, bold=True)
+            try:
+                answer = input(prompt).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False
+            if answer in {"v", "view"} and diff_text:
+                self.show_diff(diff_text)
+                continue
+            return answer in {"y", "yes"}
+
+    def show_diff(self, diff_text: str) -> None:
+        if not diff_text.strip():
+            print(self.palette.paint("\n    No diff detected for planned operations.\n", self.palette.SLATE))
+            return
+        c = self.palette
+        cols = shutil.get_terminal_size((80, 24)).columns
+        w = self._width(max_cols=max(cols - 2, 80))
+        inner_w = w - 4
+        title = c.paint(" Proposed Plan Diff ", c.CYAN, bold=True)
+        top = f"\n {title}{' ' * max(0, inner_w - _vlen(title) + 1)}"
+        bot = f" {' ' * (w - 2)}"
+        print(c.paint(top, c.SLATE))
+        for line in diff_text.splitlines():
+            stripped = line.rstrip()
+            if stripped.startswith("---") or stripped.startswith("+++"):
+                colored = c.paint(stripped, c.CYAN, bold=True)
+            elif stripped.startswith("@@"):
+                colored = c.paint(stripped, c.AMBER)
+            elif stripped.startswith("+"):
+                colored = c.paint(stripped, c.GREEN)
+            elif stripped.startswith("-"):
+                colored = c.paint(stripped, c.RED)
+            else:
+                colored = c.paint(stripped, c.SLATE)
+            pad = max(0, inner_w - _vlen(colored))
+            print(f"  {colored}{' ' * pad} ")
+        print(f"{c.paint(bot, c.SLATE)}\n")
 
     def cancelled(self) -> None:
         c = self.palette
@@ -368,11 +403,12 @@ class TerminalUI:
         _row(f"  {c.paint('3.', c.CORAL, bold=True)} {c.paint('Copy AI prompt', c.WHITE, bold=True)} instructions to clipboard ({c.paint('-p', c.CYAN)})")
         _row(f"  {c.paint('4.', c.CORAL, bold=True)} {c.paint('Quick guide', c.WHITE, bold=True)} & syntax reference ({c.paint('-h', c.CYAN)})")
         _row(f"  {c.paint('5.', c.CORAL, bold=True)} {c.paint('Check for updates', c.WHITE, bold=True)} from GitHub ({c.paint('update', c.CYAN)})")
+        _row(f"  {c.paint('6.', c.CORAL, bold=True)} {c.paint('Undo last plan', c.WHITE, bold=True)} revert file changes ({c.paint('undo', c.CYAN)})")
         _row(f"  {c.paint('q.', c.SLATE, bold=True)} Exit")
         _row()
         print(f"{c.paint(bot, c.SLATE)}\n")
 
-        prompt = c.paint("❯ Choose an option [1/2/3/4/5/q]: ", c.CORAL, bold=True)
+        prompt = c.paint("  Choose an option [1/2/3/4/5/6/q]: ", c.CORAL, bold=True)
         try:
             return input(prompt).strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -483,7 +519,8 @@ class TerminalUI:
 
     def error(self, message: str) -> None:
         c = self.palette
-        w = self._width()
+        cols = shutil.get_terminal_size((80, 24)).columns
+        w = self._width(max_cols=max(cols - 2, 80))
         inner_w = w - 4
 
         title = c.paint(" Execution / Validation Error ", c.RED, bold=True)

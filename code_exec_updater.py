@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -24,6 +26,7 @@ CORE_MODULES = [
     "code_exec_fs.py",
     "code_exec_updater.py",
     "code_exec_instructions.md",
+    "pyproject.toml",
 ]
 
 
@@ -116,19 +119,31 @@ def update_code_exec(target_dir: Path | None = None) -> bool:
             ui.error(f"ERR|GIT_PULL_FAILED|{exc.stderr or exc}")
             return False
 
-    print(c.paint(f"  Downloading updated modules to {install_dir}...", c.SLATE))
-    for mod in CORE_MODULES:
-        file_url = f"{GITHUB_RAW_BASE}/{mod}"
-        try:
-            req = urllib.request.Request(file_url, headers={"User-Agent": "code-exec-updater"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                content = resp.read().decode("utf-8")
-            target_path = install_dir / mod
-            target_path.write_text(content, encoding="utf-8")
-            print(f"    ✔ Updated {mod}")
-        except Exception as exc:
-            ui.error(f"ERR|DOWNLOAD_FAILED|Could not update {mod}: {exc}")
-            return False
+    print(c.paint(f"  Downloading updated modules to staging directory...", c.SLATE))
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        staging_dir = Path(tmp_dir)
+        downloaded = {}
+        for mod in CORE_MODULES:
+            file_url = f"{GITHUB_RAW_BASE}/{mod}"
+            try:
+                req = urllib.request.Request(file_url, headers={"User-Agent": "code-exec-updater"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    content = resp.read().decode("utf-8")
+                staging_file = staging_dir / mod
+                staging_file.parent.mkdir(parents=True, exist_ok=True)
+                staging_file.write_text(content, encoding="utf-8")
+                downloaded[mod] = staging_file
+                print(f"      Downloaded {mod}")
+            except Exception as exc:
+                ui.error(f"ERR|DOWNLOAD_FAILED|Could not update {mod}: {exc}")
+                return False
 
-    print(c.paint(f"\n  ✨ code-exec successfully updated to {remote['sha']}!\n", c.GREEN, bold=True))
+        # Atomically copy all validated files into the install directory
+        for mod, staging_file in downloaded.items():
+            target_path = install_dir / mod
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staging_file, target_path)
+            print(f"      Updated {mod}")
+
+    print(c.paint(f"\n    code-exec successfully updated to {remote['sha']}!\n", c.GREEN, bold=True))
     return True

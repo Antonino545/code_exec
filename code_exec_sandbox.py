@@ -10,6 +10,7 @@ from code_exec_types import (
     ALLOWED_RUN_COMMAND_PREFIXES,
     FORBIDDEN_RUN_SUBSTRINGS,
     INTERACTIVE_ONLY_PREFIXES,
+    SHELL_CHAINING_OPERATORS,
     OpError,
 )
 
@@ -56,8 +57,10 @@ def validate_run_command(cmd: str) -> bool:
     if re.search(r"\b(python[0-9.]*|node|bash|sh|perl|ruby)\s+(-[a-zA-Z]*c|--command|-i|-e)\b", cmd_lower):
         raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - inline execution or interactive shell flags are forbidden")
 
+    has_chaining = any(op in trimmed for op in SHELL_CHAINING_OPERATORS)
+
     if any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES):
-        return False
+        return True if has_chaining else False
 
     if any(cmd_lower.startswith(prefix) for prefix in INTERACTIVE_ONLY_PREFIXES):
         return True

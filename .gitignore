@@ -1,3 +1,8 @@
 .DS_Store
-/pycache/__pycache__/
+/pycache/
+__pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
+.code_exec/
