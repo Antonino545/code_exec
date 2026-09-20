@@ -237,11 +237,19 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
     def test_run_command_guardrails(self):
         from code_exec import validate_run_command
 
-        # Whitelisted commands pass
-        validate_run_command("python3 -m unittest test_code_exec.py")
-        validate_run_command("pytest tests/")
-        validate_run_command("npm test")
-        validate_run_command("cargo test")
+        # Whitelisted commands pass and return False (no prompt needed)
+        self.assertFalse(validate_run_command("python3 -m unittest test_code_exec.py"))
+        self.assertFalse(validate_run_command("pytest tests/"))
+        self.assertFalse(validate_run_command("npm test"))
+        self.assertFalse(validate_run_command("cargo test"))
+
+        # Interactive-only commands pass validation but return True (prompt required)
+        self.assertTrue(validate_run_command("python3 script.py"))
+
+        # Blocked inline execution
+        with self.assertRaises(OpError) as ctx:
+            validate_run_command("python3 -c 'import os'")
+        self.assertIn("ERR|FORBIDDEN_COMMAND", str(ctx.exception))
 
         # Forbidden dangerous commands fail
         with self.assertRaises(OpError) as ctx:
@@ -263,6 +271,27 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
         with self.assertRaises(OpError) as ctx:
             execute(op, vfs)
         self.assertIn("ERR|DELETE_NOT_FOUND|does_not_exist.txt", str(ctx.exception))
+
+    def test_conflicting_operations_detection(self):
+        from code_exec import preflight
+        
+        # Test 1: Double CREATE
+        ops_create = [
+            Operation("CREATE", ("conflict.txt",), "A"),
+            Operation("CREATE", ("conflict.txt",), "B")
+        ]
+        with self.assertRaises(OpError) as ctx:
+            preflight(ops_create)
+        self.assertIn("ERR|CONFLICTING_OPERATIONS", str(ctx.exception))
+
+        # Test 2: DELETE then EDIT
+        ops_edit = [
+            Operation("DELETE", ("conflict2.txt",)),
+            Operation("EDIT", ("conflict2.txt",), "SEARCH", "REPLACE")
+        ]
+        with self.assertRaises(OpError) as ctx2:
+            preflight(ops_edit)
+        self.assertIn("ERR|CONFLICTING_OPERATIONS", str(ctx2.exception))
 
     def test_content_block_with_nested_backticks(self):
         ai_response = (
