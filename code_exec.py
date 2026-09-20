@@ -1203,7 +1203,9 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
-                        help="Direct action: 'apply' or 'run' to execute plan immediately")
+                        help="Direct action: 'apply', 'run', or 'theme'")
+    parser.add_argument("subarg", nargs="?", default=None,
+                        help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
                         help="Show interactive usage guide and options")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
@@ -1223,6 +1225,40 @@ def main(argv=None) -> int:
                         help=f"Seconds allowed per RUN command, 0 = no limit "
                              f"(default {DEFAULT_RUN_TIMEOUT})")
     args = parser.parse_args(argv)
+
+    # Handle actions or numeric menu shortcuts from CLI
+    if args.action in {"1", "apply"}:
+        args.action = "apply"
+    elif args.action == "2":
+        args.dry_run = True
+        args.action = "apply"
+    elif args.action in {"3", "prompt", "-p"}:
+        args.prompt = True
+        args.action = None
+    elif args.action in {"4", "help", "-h"}:
+        args.help = True
+        args.action = None
+    elif args.action == "5":
+        themes = list(ui.palette.themes.keys())
+        print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
+        print(f"  Available themes: {', '.join(themes)}")
+        print(f"  Usage: code-exec theme <name>\n")
+        return 0
+    elif args.action == "theme":
+        if args.subarg:
+            if args.subarg in ui.palette.themes:
+                ui.palette.set_theme(args.subarg)
+                print(f"\n  ✨ Theme successfully switched to '{args.subarg}'!\n")
+                return 0
+            else:
+                return fail(f"Unknown theme '{args.subarg}'. Available: {', '.join(ui.palette.themes.keys())}")
+        else:
+            print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
+            print(f"  Available themes: {', '.join(ui.palette.themes.keys())}")
+            print(f"  Usage: code-exec theme <name>\n")
+            return 0
+    elif args.action and not args.file and not Path(args.action).exists():
+        return fail(f"Unknown command or file: '{args.action}'. Run 'code-exec' without arguments for the menu.")
 
     # Launch interactive menu if run without arguments in an interactive terminal
     is_interactive = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
