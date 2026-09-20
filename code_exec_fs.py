@@ -187,6 +187,14 @@ class VirtualFS:
     def mkdir(self, path):
         self._mkparents(path)
 
+    def touch(self, path):
+        if not self.lexists(path):
+            self.write(path, "")
+
+    def chmod(self, path, mode):
+        if not self.lexists(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{rel(path)}")
+
     def delete(self, path):
         self._drop_children(path)
         self.state[path] = ("gone",)
@@ -277,6 +285,31 @@ class RealFS:
     def mkdir(self, path):
         self._mkparents(path)
 
+    def touch(self, path: Path):
+        self._mkparents(path.parent)
+        if not os.path.lexists(path):
+            self.journal.append(("remove", path))
+        path.touch()
+
+    def chmod(self, path: Path, mode_str: str):
+        if not os.path.lexists(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{rel(path)}")
+        old_mode = stat.S_IMODE(path.stat().st_mode)
+        self.journal.append(("chmod", path, old_mode))
+        if mode_str in {"+x", "a+x", "u+x"}:
+            new_mode = old_mode | 0o111
+        elif mode_str in {"-x", "a-x"}:
+            new_mode = old_mode & ~0o111
+        else:
+            try:
+                new_mode = int(mode_str, 8)
+            except ValueError:
+                raise OpError(f"ERR|INVALID_MODE|Invalid chmod mode: {mode_str}")
+        try:
+            os.chmod(path, new_mode)
+        except OSError as exc:
+            raise OpError(f"Cannot chmod {rel(path)}: {exc}") from None
+
     def delete(self, path):
         slot = self._slot()
         try:
@@ -353,6 +386,11 @@ class RealFS:
                 elif kind == "move_back":
                     entry[2].parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(path), str(entry[2]))
+                elif kind == "chmod":
+                    try:
+                        os.chmod(path, entry[2])
+                    except OSError:
+                        pass
             except Exception as exc:
                 errors.append(f"{kind} {rel(path)}: {exc}")
         self.journal.clear()
@@ -449,6 +487,12 @@ def undo_last_run() -> tuple[bool, str]:
                     src_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(path), str(src_path))
                     restored_count += 1
+            elif kind == "chmod" and slot:
+                try:
+                    os.chmod(path, int(slot))
+                    restored_count += 1
+                except (ValueError, OSError):
+                    pass
         except Exception as exc:
             errors.append(f"Failed to undo {kind} on {rel_path}: {exc}")
 

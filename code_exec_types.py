@@ -89,7 +89,7 @@ SHELL_CHAINING_OPERATORS = (";", "&&", "||", "|", "&", "`", "$(", "${")
 COMMANDS = {
     "CREATE", "EDIT", "DELETE", "MOVE", "COPY", "RENAME", "MKDIR",
     "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "RUN",
-    "COMMIT",
+    "COMMIT", "REPLACE_ALL", "CHMOD", "TOUCH",
 }
 
 
