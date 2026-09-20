@@ -509,6 +509,56 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             if target.exists():
                 target.unlink()
 
+    def test_hallucinated_unknown_commands(self):
+        for cmd in ["UPDATE file.txt", "MODIFY file.txt", "PATCH file.txt", "APPEND_LINE file.txt", "WRITE file.txt"]:
+            with self.assertRaises(ValueError) as ctx:
+                parse_operations(f"{cmd}\n<<<\ncontent\n>>>\n")
+            self.assertIn("Unknown instruction", str(ctx.exception))
+
+    def test_hallucinated_edit_keywords(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations("EDIT file.txt\nFIND\n<<<\nold\n>>>\nREPLACE\n<<<\nnew\n>>>\n")
+        self.assertIn("EDIT requires SEARCH", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations("EDIT file.txt\nSEARCH\n<<<\nold\n>>>\nWITH\n<<<\nnew\n>>>\n")
+        self.assertIn("EDIT requires REPLACE", str(ctx.exception))
+
+    def test_hallucinated_move_syntax(self):
+        for bad_move in ["MOVE old.txt to new.txt", "MOVE old.txt new.txt", "COPY old.txt destination/"]:
+            with self.assertRaises(ValueError) as ctx:
+                parse_operations(bad_move)
+            self.assertIn("requires 'source -> destination'", str(ctx.exception))
+
+    def test_hallucinated_shell_commands_without_run(self):
+        for cmd in ["npm test", "git commit -m 'update'", "pytest", "pip install -r requirements.txt"]:
+            with self.assertRaises(ValueError) as ctx:
+                parse_operations(cmd)
+            self.assertIn("Unknown instruction", str(ctx.exception))
+
+    def test_hallucinated_conversational_text_inside_plan(self):
+        plan = (
+            "Here is how we update the code:\n"
+            "CREATE test.txt\n"
+            "<<<\n"
+            "hello\n"
+            ">>>\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations(plan)
+        self.assertIn("Unknown instruction", str(ctx.exception))
+
+    def test_hallucinated_unclosed_block(self):
+        plan = (
+            "CREATE unclosed.txt\n"
+            "<<<\n"
+            "line 1\n"
+            "line 2\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations(plan)
+        self.assertIn("Missing >>>", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

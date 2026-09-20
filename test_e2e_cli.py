@@ -119,6 +119,33 @@ class TestCodeExecCLI(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ERR|SEARCH_NOT_FOUND|index.js", result.stderr)
 
+    def test_e2e_hallucinated_unknown_command_rejection(self):
+        fence = chr(96) * 3
+        response = (
+            "Here is the update plan:\n\n"
+            f"{fence}code_exec\n"
+            "UPDATE config.ini\n"
+            "<<<\n"
+            "setting = 1\n"
+            ">>>\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown instruction: 'UPDATE config.ini'", result.stderr)
+
+    def test_e2e_hallucinated_bare_shell_command_rejection(self):
+        fence = chr(96) * 3
+        response = (
+            "Let's run the test command:\n\n"
+            f"{fence}code_exec\n"
+            "npm test\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown instruction: 'npm test'", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
