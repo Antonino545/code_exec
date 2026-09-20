@@ -274,6 +274,19 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             execute(op, vfs)
         self.assertIn("ERR|DELETE_NOT_FOUND|does_not_exist.txt", str(ctx.exception))
 
+    def test_updater_metadata_retrieval(self):
+        import io
+        from unittest.mock import patch
+        from code_exec_updater import fetch_latest_commit_metadata
+
+        mock_payload = b'{"sha": "a1b2c3d4e5f6", "commit": {"message": "feat: test commit\\n\\nextended", "author": {"name": "Antonino", "date": "2026-09-20T12:00:00Z"}}}'
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value = io.BytesIO(mock_payload)
+            meta = fetch_latest_commit_metadata()
+            self.assertEqual(meta["sha"], "a1b2c3d")
+            self.assertEqual(meta["message"], "feat: test commit")
+            self.assertEqual(meta["author"], "Antonino")
+
     def test_fuzzy_search_fallback_above_90_percent(self):
         vfs = VirtualFS()
         test_file = ROOT / "test_fuzzy.txt"

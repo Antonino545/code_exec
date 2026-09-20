@@ -386,7 +386,7 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
-                        help="Direct action: 'apply', 'run', or 'theme'")
+                        help="Direct action: 'apply', 'run', 'theme', or 'update'")
     parser.add_argument("subarg", nargs="?", default=None,
                         help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
@@ -420,7 +420,10 @@ def main(argv=None) -> int:
     elif args.action in {"4", "help", "-h"}:
         args.help = True
         args.action = None
-    elif args.action == "5":
+    elif args.action in {"5", "update"}:
+        from code_exec_updater import update_code_exec
+        return 0 if update_code_exec() else 1
+    elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
         print(f"\n  🎨 Current theme: {ui.palette.current_theme}")
         print(f"  Available themes: {', '.join(themes)}")
@@ -457,6 +460,9 @@ def main(argv=None) -> int:
             args.prompt = True
         elif choice == "4":
             args.help = True
+        elif choice in {"5", "u", "update"}:
+            from code_exec_updater import update_code_exec
+            return 0 if update_code_exec() else 1
         else:
             ui.error(f"Invalid option: {choice}")
             return 1

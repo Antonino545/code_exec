@@ -365,11 +365,12 @@ class TerminalUI:
         _row(f"  {c.paint('2.', c.CORAL, bold=True)} {c.paint('Dry-run', c.WHITE, bold=True)} validate plan from clipboard")
         _row(f"  {c.paint('3.', c.CORAL, bold=True)} {c.paint('Copy AI prompt', c.WHITE, bold=True)} instructions to clipboard ({c.paint('-p', c.CYAN)})")
         _row(f"  {c.paint('4.', c.CORAL, bold=True)} {c.paint('Quick guide', c.WHITE, bold=True)} & syntax reference ({c.paint('-h', c.CYAN)})")
+        _row(f"  {c.paint('5.', c.CORAL, bold=True)} {c.paint('Check for updates', c.WHITE, bold=True)} from GitHub ({c.paint('update', c.CYAN)})")
         _row(f"  {c.paint('q.', c.SLATE, bold=True)} Exit")
         _row()
         print(f"{c.paint(bot, c.SLATE)}\n")
 
-        prompt = c.paint("❯ Choose an option [1/2/3/4/q]: ", c.CORAL, bold=True)
+        prompt = c.paint("❯ Choose an option [1/2/3/4/5/q]: ", c.CORAL, bold=True)
         try:
             return input(prompt).strip().lower()
         except (EOFError, KeyboardInterrupt):
