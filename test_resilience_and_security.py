@@ -89,7 +89,17 @@ class TestResilienceAndSecurity(unittest.TestCase):
         execute(op_move, fs)
         self.assertFalse((self.scratch / "subdir/renamed.txt").exists())
         self.assertTrue((self.scratch / "moved.txt").is_file())
-
+        # 10. PATCH
+        patch_txt = (
+            "@@ -1,3 +1,3 @@\n"
+            " prepended line\n"
+            "-base line\n"
+            "+base line patched\n"
+            " after base\n"
+        )
+        op_patch = Operation("PATCH", (f"{self.scratch_rel}/moved.txt",), patch_txt)
+        execute(op_patch, fs)
+        self.assertIn("base line patched", (self.scratch / "moved.txt").read_text(encoding="utf-8"))
         # Rollback all disk modifications
         errors = fs.rollback()
         self.assertEqual(errors, [])

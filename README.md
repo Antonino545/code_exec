@@ -178,6 +178,7 @@ The AI can analyze and explain its reasoning in plain text outside the code bloc
 | :--- | :--- | :--- |
 | `CREATE` | `CREATE path <<< content >>>` | Creates a new file. Fails if the file already exists. |
 | `EDIT` | `EDIT path SEARCH <<<...>>> REPLACE <<<...>>>` | Surgically replaces a unique code anchor. |
+| `PATCH` | `PATCH path <<< unified diff >>>` | Applies unified diff with line-drift tolerance. |
 | `DELETE` | `DELETE path` | Removes a file or directory safely. |
 | `MOVE` | `MOVE src -> dst` | Moves a file or directory. |
 | `COPY` | `COPY src -> dst` | Copies a file or folder. |

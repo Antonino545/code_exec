@@ -67,7 +67,9 @@ from code_exec_matcher import (
     _match_line_spans,
     _normalize_jsx_line,
     _strip_symbols_and_emojis,
+    apply_unified_patch,
     find_unique,
+    parse_unified_diff,
 )
 
 # Re-export parser and clipboard
@@ -114,6 +116,16 @@ def execute(op: Operation, fs) -> str | None:
             text += "\n"
         fs.write(path, text)
         return f"Created {args[0]}"
+
+    if command == "PATCH":
+        path = safe_path(args[0])
+        if not fs.is_file(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+        doc = fs.read(path)
+        newline = newline_style(doc)
+        new_doc, count = apply_unified_patch(doc, op.data or "", args[0], newline)
+        fs.write(path, new_doc)
+        return f"Patched {args[0]} ({count} hunk{'s' if count != 1 else ''})"
 
     if command in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
         path = safe_path(args[0])
@@ -268,7 +280,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 execute(op, vfs)
             except Exception:
                 pass
-        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "REPLACE_ALL"}:
+        elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "REPLACE_ALL", "PATCH"}:
             target = op.args[0]
             try:
                 target_path = safe_path(target)
@@ -335,7 +347,7 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
                 history = file_history.setdefault(path_str, [])
                 if op.command == "CREATE" and "CREATE" in history:
                     raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
-                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "CHMOD"}:
+                if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "CHMOD", "PATCH"}:
                     if "DELETE" in history:
                         raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to operate on a file that was DELETED in the same plan")
                 history.append(op.command)
@@ -422,6 +434,16 @@ def _get_error_guidance(error_msg: str) -> str:
         hints.append(
             "- **FORBIDDEN_COMMAND**: The RUN command is forbidden or destructive. "
             "Use standard test runners (e.g. pytest, python3 -m unittest, npm test, cargo test)."
+        )
+    if "ERR|UNKNOWN_COMMAND" in error_msg:
+        hints.append(
+            f"- **UNKNOWN_COMMAND**: An unrecognized command was used. Supported commands: {', '.join(sorted(COMMANDS))}. "
+            "Check the suggested command hint in the error and update your instruction."
+        )
+    if "ERR|PATCH_FAILED" in error_msg:
+        hints.append(
+            "- **PATCH_FAILED**: A unified diff hunk could not be applied. "
+            "Verify the context lines against current file contents, or use EDIT with SEARCH/REPLACE instead."
         )
     if not hints:
         hints.append("- Review the error details above and fix the problematic command or target block.")
@@ -571,7 +593,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
-                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD"}:
+                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
                     modified_paths.extend([op.args[0], op.args[1]])
@@ -780,7 +802,7 @@ def main(argv=None) -> int:
 
     try:
         operations = parse_operations(plan_text)
-    except ValueError as exc:
+    except (ValueError, OpError) as exc:
         return fail(f"Could not parse instructions: {exc}")
 
     if not operations:

@@ -120,6 +120,7 @@ class TerminalUI:
         colors = {
             "CREATE": c.GREEN,
             "EDIT": c.AMBER,
+            "PATCH": c.AMBER,
             "REPLACE_ALL": c.AMBER,
             "DELETE": c.RED,
             "MOVE": c.CYAN,
@@ -151,6 +152,10 @@ class TerminalUI:
             del_lines = self._line_count(op.data)
             add_lines = self._line_count(op.extra)
             diff = c.paint(f"(-{del_lines} / +{add_lines})", c.AMBER)
+            return f"{badge} {args[0]} {diff}"
+        if cmd == "PATCH":
+            lines = self._line_count(op.data)
+            diff = c.paint(f"(patch {lines} lines)", c.AMBER)
             return f"{badge} {args[0]} {diff}"
 
         if cmd in {"INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND"}:
@@ -197,6 +202,7 @@ class TerminalUI:
         _row(c.paint("Commands & Syntax:", c.WHITE, bold=True))
         _row(f"  {c.paint('CREATE', c.GREEN, bold=True):<18} {c.paint('path', c.SLATE)} <<< content >>>")
         _row(f"  {c.paint('EDIT', c.AMBER, bold=True):<18} {c.paint('path', c.SLATE)} SEARCH <<<...>>> REPLACE <<<...>>>")
+        _row(f"  {c.paint('PATCH', c.AMBER, bold=True):<18} {c.paint('path', c.SLATE)} <<< unified diff >>>")
         _row(f"  {c.paint('REPLACE_ALL', c.AMBER, bold=True):<18} {c.paint('path', c.SLATE)} SEARCH <<<...>>> REPLACE <<<...>>>")
         _row(f"  {c.paint('DELETE', c.RED, bold=True):<18} {c.paint('path', c.SLATE)}")
         _row(f"  {c.paint('CHMOD', c.CYAN, bold=True):<18} {c.paint('path mode', c.SLATE)} (+x, 755, 644)")
@@ -635,6 +641,10 @@ class TerminalUI:
             hint = "Tip: Target is a sensitive file/key. Modify configuration files manually."
         elif "ERR|MULTIPLE_PLANS" in message:
             hint = "Tip: Multiple plan blocks found. Provide a single plan block per response."
+        elif "ERR|UNKNOWN_COMMAND" in message:
+            hint = "Tip: Unsupported command. Check the hint or run 'code-exec -h' for supported instructions."
+        elif "ERR|PATCH_FAILED" in message:
+            hint = "Tip: Unified diff hunk could not be matched. Verify context lines or use EDIT."
 
         if hint:
             print(f" {' ' * (inner_w + 2)} ", file=sys.stderr)

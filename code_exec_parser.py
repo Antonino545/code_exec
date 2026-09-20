@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import subprocess
@@ -7,6 +8,25 @@ import sys
 from pathlib import Path
 
 from code_exec_types import COMMANDS, Operation, OpError, clean_path
+
+COMMAND_ALIASES = {
+    "UPDATE": "EDIT",
+    "MODIFY": "EDIT",
+    "CHANGE": "EDIT",
+    "WRITE": "CREATE",
+    "NEW": "CREATE",
+    "ADD": "CREATE",
+    "REMOVE": "DELETE",
+    "RM": "DELETE",
+    "DEL": "DELETE",
+    "MV": "MOVE",
+    "CP": "COPY",
+    "APPEND_LINE": "APPEND",
+    "PREPEND_LINE": "PREPEND",
+    "RUN_COMMAND": "RUN",
+    "EXEC": "RUN",
+    "EXECUTE": "RUN",
+}
 
 
 def get_clipboard() -> str:
@@ -259,9 +279,18 @@ def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tupl
 def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     line = lines[i].strip()
     match = re.match(r"^([A-Z_]+)(?:\s+(.*))?$", line)
-
-    if not match or match.group(1) not in COMMANDS:
-        raise ValueError(f"Unknown instruction: {line!r}")
+    raw_cmd = match.group(1) if match else line.split()[0]
+    cmd = raw_cmd.strip()
+    if not match or cmd not in COMMANDS:
+        cmd_upper = cmd.upper()
+        if cmd_upper in COMMAND_ALIASES:
+            hint = f" Did you mean '{COMMAND_ALIASES[cmd_upper]}'?"
+        elif cmd.lower() in {"npm", "pnpm", "yarn", "pytest", "python", "python3", "cargo", "go", "ruff", "black", "git"}:
+            hint = f" Shell commands must be prefixed with RUN. Did you mean 'RUN {line}'?"
+        else:
+            matches = difflib.get_close_matches(cmd_upper, sorted(COMMANDS), n=1, cutoff=0.6)
+            hint = f" Did you mean '{matches[0]}'?" if matches else ""
+        raise OpError(f"ERR|UNKNOWN_COMMAND|{cmd} - Unsupported command.{hint}")
 
     command = match.group(1)
     rest = (match.group(2) or "").strip()
@@ -296,7 +325,7 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
 
     path = clean_path(rest)
 
-    if command in {"CREATE", "APPEND", "PREPEND"}:
+    if command in {"CREATE", "APPEND", "PREPEND", "PATCH"}:
         content, i = read_block(lines, i, inline_started=inline_block)
         return Operation(command, (path,), content), i
 
@@ -340,6 +369,8 @@ def parse_operations(text: str) -> list[Operation]:
         lineno = i + 1
         try:
             operation, i = _parse_instruction(lines, i)
+        except OpError as exc:
+            raise OpError(f"line {lineno}: {exc}") from None
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
         operations.append(operation)
