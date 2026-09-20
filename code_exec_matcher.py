@@ -293,8 +293,12 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     if fuzzy is not None:
         start, end, s_line, e_line, sim = fuzzy
         pct = int(sim * 100)
-        ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {s_line + 1}-{e_line + 1}")
-        return MatchResult(start, end, f" (fuzzy matched with {pct}% similarity)", True, (s_line, e_line))
+        if pct < 100:
+            ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {s_line + 1}-{e_line + 1}")
+            note = f" (fuzzy matched with {pct}% similarity)"
+        else:
+            note = " (matched ignoring non-standard symbols)"
+        return MatchResult(start, end, note, True, (s_line, e_line))
 
     # ---- Diagnostic failure ----
     diagnostic = _find_closest_match(doc, needle)
