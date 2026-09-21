@@ -24,6 +24,7 @@ CORE_MODULES = [
     "code_exec_matcher.py",
     "code_exec_parser.py",
     "code_exec_fs.py",
+    "code_exec_plan_export.py",
     "code_exec_updater.py",
     "code_exec_instructions.md",
     "pyproject.toml",

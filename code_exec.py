@@ -728,7 +728,7 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
-                        help="Direct action: 'apply', 'undo', 'theme', or 'update'")
+                        help="Direct action: 'apply', 'undo', 'theme', 'update', or 'export-plan'")
     parser.add_argument("subarg", nargs="?", default=None,
                         help="Sub-argument for actions (e.g., theme name)")
     parser.add_argument("-h", "--help", action="store_true",
@@ -737,6 +737,8 @@ def main(argv=None) -> int:
                         help="Copy git diff prompt to clipboard for AI commit message generation")
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
+    parser.add_argument("--export-plan", "--plan-only", dest="export_plan", action="store_true",
+                        help="Export a minimal clean project folder (.plan-only) containing only relevant files")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
     parser.add_argument("--tree", action="store_true",
@@ -784,6 +786,9 @@ def main(argv=None) -> int:
         return fail(msg)
     elif args.action in {"7", "commit-prompt", "docommit", "commit"}:
         args.commit_prompt = True
+        args.action = None
+    elif args.action in {"8", "export-plan", "plan-export", "plan-only"}:
+        args.export_plan = True
         args.action = None
     elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
@@ -848,6 +853,8 @@ def main(argv=None) -> int:
             return fail(msg)
         elif choice in {"7", "c", "commit", "commit-prompt", "docommit"}:
             args.commit_prompt = True
+        elif choice in {"8", "export-plan", "plan-export", "plan-only"}:
+            args.export_plan = True
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
@@ -855,6 +862,25 @@ def main(argv=None) -> int:
     if args.help:
         ui.show_guide()
         return 0
+
+    if args.export_plan:
+        from code_exec_plan_export import create_plan_folder
+        try:
+            plan_content = ""
+            try:
+                plan_content = read_input(args)
+            except Exception:
+                pass
+            res = create_plan_folder(plan_text=plan_content)
+            ui.plan_export_success(
+                location=str(res["location"]),
+                included=int(res["included"]),
+                ignored=int(res["ignored"]),
+                ignore_file=str(res["ignore_file"]),
+            )
+            return 0
+        except Exception as exc:
+            return fail(f"Could not export plan-only folder: {exc}")
 
     if args.commit_prompt:
         try:

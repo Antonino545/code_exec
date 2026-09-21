@@ -433,6 +433,7 @@ class TerminalUI:
         lines.append(self._divider("Commands"))
         row("code-exec", "Open the interactive launcher menu", c.WHITE)
         row("code-exec apply", "Apply the plan from your clipboard", c.WHITE)
+        row("code-exec export-plan", "Export clean .plan-only project folder", c.WHITE)
         row("code-exec undo", "Revert the last applied plan", c.WHITE)
         row("code-exec update", "Install the latest version from GitHub", c.WHITE)
         row("code-exec theme <name>", f"Set theme: {', '.join(c.themes)}", c.WHITE)
@@ -500,6 +501,7 @@ class TerminalUI:
             ("5", "Check updates", "install latest from GitHub", "update"),
             ("6", "Undo last plan", "revert file changes", "undo"),
             ("7", "Commit prompt", "git diff prompt to clipboard", "-c"),
+            ("8", "Plan folder", "export clean .plan-only context", "export-plan"),
         ]
         lines = [""]
         for key, label, desc, flag in items:
@@ -513,7 +515,7 @@ class TerminalUI:
         self.render_panel(title=self._title("Menu", "brand"), lines=lines)
         print()
         try:
-            return self.prompt_choice("Choose an option [1-7/q]", default="q").lower()
+            return self.prompt_choice("Choose an option [1-8/q]", default="q").lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return "q"
@@ -875,6 +877,16 @@ class TerminalUI:
     def commit_failed(self, error: str) -> None:
         c = self.palette
         self._card("Commit skipped", "warn", [self._line(error, c.AMBER)])
+
+    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str) -> None:
+        c = self.palette
+        lines = [
+            self._kv("Location", c.paint(location, c.CYAN, bold=True)),
+            self._kv("Files included", c.paint(str(included), c.GREEN, bold=True)),
+            self._kv("Files ignored", c.paint(str(ignored), c.SLATE)),
+            self._kv("Ignore file", c.paint(ignore_file, c.WHITE)),
+        ]
+        self._card("Plan-only folder updated", "ok", lines)
 
     # ------------------------------------------------------------------ #
     # Warnings, errors & recovery
