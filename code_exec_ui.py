@@ -413,7 +413,8 @@ class TerminalUI:
         row("EDIT", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
         row("PATCH", "path", c.AMBER, "<<< unified diff >>>", bold=True)
         row("REPLACE_ALL", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
-        row("DELETE", "path", c.RED, bold=True)
+        row("DELETE", "path", c.RED, "(file or folder)", bold=True)
+        row("MKDIR", "path", c.GREEN, "(create folder)", bold=True)
         row("CHMOD", "path mode", c.CYAN, "(+x, 755, 644)", bold=True)
         row("TOUCH", "path", c.GREEN, bold=True)
         row("MOVE", "src -> dst", c.CYAN, bold=True)
@@ -430,6 +431,7 @@ class TerminalUI:
         lines.append(self._divider("Options"))
         row("--diff", "Show a unified diff before applying", c.CYAN)
         row("--dry-run", "Validate the plan without modifying files", c.CYAN)
+        row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
@@ -561,6 +563,15 @@ class TerminalUI:
         self._card("Dry run", "ok", [
             self._line("All operations simulated cleanly.", c.WHITE, bold=True),
             self._kv("Files", c.paint("unchanged", c.SLATE)),
+        ])
+
+    def parse_check_success(self, count: int) -> None:
+        c = self.palette
+        noun = "operation" if count == 1 else "operations"
+        self._card("Syntax Check Passed", "ok", [
+            self._line(f"Parsed {count} {noun} cleanly without errors.", c.WHITE, bold=True),
+            self._kv("Mode", c.paint("parser-only (debug)", c.CYAN)),
+            self._kv("Filesystem", c.paint("not touched / not queried", c.SLATE)),
         ])
 
     # ------------------------------------------------------------------ #

@@ -1,6 +1,11 @@
 # code_exec plans
 
-You modify an existing project. For any file change or command, output ONE closed `code_exec` block. Explain outside it; never put prose, thinking tags or raw file contents inside or outside it.
+You modify an existing project.
+
+## Workflow Protocol
+1. **Plan First**: Before modifying or creating files, formulate a concise action plan detailing all target files and folders (created, edited, or deleted).
+2. **Wait for Acceptance**: Wait for explicit user confirmation before outputting an executable plan block (unless immediate execution is requested).
+3. **Execution Block**: Once approved, output ONE closed `code_exec` block. Explain outside it; never put prose, thinking tags or raw file contents inside or outside it.
 
 ````code_exec
 COMMAND args
@@ -15,7 +20,9 @@ Use 4+ backticks if content contains ```.
 - `PATCH path <<< unified diff >>>`
 - `APPEND|PREPEND path <<< content >>>`
 - `INSERT_BEFORE|INSERT_AFTER path` + `MARKER <<<…>>>` `CONTENT <<<…>>>` (or `<<<< marker ==== content >>>>`)
-- `DELETE|MKDIR|TOUCH path` · `CHMOD path +x|755`
+- `MKDIR path` create folder/directory
+- `DELETE path` delete file or folder
+- `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst`
 - `RUN cmd` only `python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`; no `-c/-i/-e`, `rm -rf`, `sudo`; always prefix shell commands with `RUN`
 - `COMMIT type(scope): description` last line after file changes
@@ -24,6 +31,8 @@ Delimiters sit on their own line; content is verbatim. Only `>>>`/`>>>>` close a
 
 ## Rules
 - Paths project-relative (`src/App.jsx`); no `..`, absolute paths, `.git`; never touch `.env*`, keys/certs, `.github/workflows/*`, `.gitlab-ci.yml`.
+- Outline intended file/directory modifications and wait for user confirmation before executing.
+- Folders: Use `MKDIR path` to create folders and `DELETE path` to delete files or folders.
 - No contradictory ops on one file (double `CREATE`, edit after `DELETE`).
 - SEARCH must exist verbatim and match exactly once: 3–6 lines, unique anchor (max 60 lines/4000 chars). Use several small blocks, not one big one. In JSX/HTML never search bare tags (`<div>`, `return (`); use unique classes, props, text. REPLACE only what must change; keep indentation.
 - Matching tolerates whitespace/indentation but never code, strings or attributes.
@@ -36,4 +45,5 @@ Delimiters sit on their own line; content is verbatim. Only `>>>`/`>>>>` close a
 - `FORBIDDEN_COMMAND` use allowed RUN · `UNKNOWN_COMMAND` bad name or prose inside block · `PATCH_FAILED` fix hunk context
 - Parse errors name the line (`line 12: …`, `Missing >>> for block opened at line 30`).
 
-`code-exec -c` builds a commit prompt from `git diff`.
+- `code-exec -c` builds a commit prompt from `git diff`.
+- `code-exec check` or `code-exec --check` validates plan parsing and syntax without touching or checking the filesystem.

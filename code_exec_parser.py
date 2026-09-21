@@ -717,6 +717,19 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             i += 1
             continue
 
+        # If a bare SEARCH/MARKER block appears after an EDIT/INSERT operation,
+        # attach it to the preceding operation instead of failing as an unknown command.
+        if operations and operations[-1].command in _PAIR_COMMANDS:
+            last_cmd = operations[-1].command
+            kw = "MARKER" if last_cmd.startswith("INSERT") else "SEARCH"
+            if _DIFF_OPEN.match(line) or re.match(rf"^{kw}\s*:?\s*(<{{1,5}})?\s*$", line, re.IGNORECASE):
+                try:
+                    first, second, i = _read_pair(lines, i, last_cmd)
+                    operations.append(Operation(last_cmd, operations[-1].args, first, second))
+                    continue
+                except ValueError as exc:
+                    raise ValueError(f"line {lineno}: {exc}") from None
+
         try:
             operation, i = _parse_instruction(lines, i)
         except OpError as exc:
