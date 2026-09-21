@@ -546,12 +546,13 @@ class TerminalUI:
         c = self.palette
         print(c.paint("  Cancelled. No files were modified.\n", c.SLATE))
 
-    def done(self, has_git: bool = False) -> None:
+    def done(self) -> None:
         c = self.palette
         print(self.panel_bottom())  # close the "Executing" panel
-        lines = [self._line("All operations applied cleanly.", c.WHITE, bold=True)]
-        if has_git:
-            lines.append(self._kv("Review", c.paint("git diff", c.CYAN)))
+        lines = [
+            self._line("All operations applied cleanly.", c.WHITE, bold=True),
+            self._kv("Review", c.paint("git diff", c.CYAN)),
+        ]
         self._card("Success", "ok", lines)
 
     def dry_run(self) -> None:

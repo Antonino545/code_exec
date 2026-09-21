@@ -619,10 +619,9 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
         return 0
 
     fs.save_backup_manifest()
-    has_git = (ROOT / ".git").exists()
-    ui.done(has_git=has_git)
+    ui.done()
 
-    if has_git and commit_msg and not no_commit:
+    if commit_msg and not no_commit:
         should_commit = auto_commit or (not exec_ops) or ui.prompt_commit(commit_msg)
         if should_commit:
             unique_paths = list(dict.fromkeys(modified_paths))
