@@ -193,6 +193,26 @@ class BlockStyles(Base):
         r = ops('CREATE i.html <<<\n<div\n  class="x"\n>\n  hi\n</div>\n>>>')
         self.assertEqual(r[0].data.count("\n"), 4)
 
+    def test_html_and_jsx_fixture_parsing_and_entities(self):
+        from pathlib import Path
+        fixtures_dir = Path(__file__).parent / "fixtures"
+        html_fixture = (fixtures_dir / "sample.html").read_text(encoding="utf-8")
+        jsx_fixture = (fixtures_dir / "Component.jsx").read_text(encoding="utf-8")
+
+        # Verify editing HTML containing lone '>' lines and literal &lt; &gt; entities
+        html_plan = f"CREATE mock.html <<<\n{html_fixture}\n>>>"
+        parsed_html = ops(html_plan)
+        self.assertEqual(parsed_html[0].command, "CREATE")
+        self.assertIn("&lt; b and c &gt; d", parsed_html[0].data)
+        self.assertIn('data-test="edge-case"\n  >', parsed_html[0].data)
+
+        # Verify JSX parsing with mixed quotes and multi-line props
+        jsx_plan = f"CREATE mock.jsx <<<\n{jsx_fixture}\n>>>"
+        parsed_jsx = ops(jsx_plan)
+        self.assertEqual(parsed_jsx[0].command, "CREATE")
+        self.assertIn("className={`btn ${isActive ? 'btn-danger' : 'btn-outline'}`}", parsed_jsx[0].data)
+        self.assertIn('alt="Analytics Overview"\n        className="w-12 h-12"\n      />', parsed_jsx[0].data)
+
     def test_nested_delimiters_in_content(self):
         r = ops("CREATE n.txt <<<\nhello\n<<<\ninner\n>>>\nbye\n>>>")
         self.assertIn("inner", r[0].data)

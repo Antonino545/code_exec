@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Edge Case HTML Fixture</title>
+</head>
+<body>
+  <!-- Test Case 1: Multi-line tag with lone '>' line (must not close >>> delimiters) -->
+  <div
+    id="main-container"
+    class="container flex-col"
+    data-test="edge-case"
+  >
+    <h1>HTML Syntax & Entity Test</h1>
+    <!-- Test Case 2: Literal HTML entities that must stay preserved byte-for-byte -->
+    <p>Comparison: a &lt; b and c &gt; d &amp; e &quot;quote&quot;</p>
+
+    <!-- Test Case 3: Lone '>' closing bracket preceded and followed by indentation -->
+    <button
+      type="button"
+      onclick="handleClick()"
+    >
+      Click Me
+    </button>
+  </div>
+</body>
+</html>
