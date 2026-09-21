@@ -349,13 +349,13 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
 
     err_prefix = "SEARCH" if what == "SEARCH" else what
 
-    # Guard against oversized search blocks in large files
+    # Guard against oversized search blocks with a warning instead of a hard block
     needle_lines_count = len(needle.split("\n"))
     needle_char_count = len(needle)
     if needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS:
-        raise OpError(
-            f"ERR|SEARCH_TOO_BIG|{target}|({needle_lines_count} lines, {needle_char_count} chars) - "
-            f"SEARCH block exceeds maximum allowed limit ({MAX_SEARCH_LINES} lines, {MAX_SEARCH_CHARS} chars)."
+        ui.warn(
+            f"Oversized {what} block in {target} ({needle_lines_count} lines, {needle_char_count} chars; "
+            f"preferred limit is {MAX_SEARCH_LINES} lines). Processing anyway..."
         )
 
     # ---- Tier 1: Exact match ----
@@ -455,6 +455,19 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         else:
             note = " (matched ignoring non-standard symbols)"
         return MatchResult(start, end, note, True, (s_line, e_line))
+
+    # ---- Tier 8: Oversized block boundary anchor fallback ----
+    if len(want_raw) > MAX_SEARCH_LINES:
+        head_lines = [ln.strip() for ln in want_raw[:4] if ln.strip()]
+        tail_lines = [ln.strip() for ln in want_raw[-4:] if ln.strip()]
+        head_spans = _match_line_spans(doc_lines, head_lines, mode="indent")
+        tail_spans = _match_line_spans(doc_lines, tail_lines, mode="indent")
+        if len(head_spans) == 1 and len(tail_spans) == 1:
+            h_start, _, h_sline, _ = head_spans[0]
+            _, t_end, _, t_eline = tail_spans[0]
+            if h_start < t_end:
+                ui.warn(f"Oversized {what} block matched using boundary anchors at lines {h_sline + 1}-{t_eline + 1}")
+                return MatchResult(h_start, t_end, " (matched oversized block via boundary anchors)", True, (h_sline, t_eline))
 
     # ---- Diagnostic failure ----
     diagnostic = _find_closest_match(doc, needle)
