@@ -654,6 +654,8 @@ def main(argv=None) -> int:
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
+    parser.add_argument("--check", action="store_true",
+                        help="Debug mode: parse and validate syntax only without reading or checking files")
     parser.add_argument("--clipboard", action="store_true",
                         help="Read instructions from clipboard (the default)")
     parser.add_argument("--file", help="Read instructions from a file ('-' for stdin)")
@@ -672,9 +674,12 @@ def main(argv=None) -> int:
 
     if args.action in {"1", "apply"}:
         args.action = "apply"
-    elif args.action == "2":
+    elif args.action in {"2"}:
         args.dry_run = True
         args.action = "apply"
+    elif args.action in {"check", "--check"}:
+        args.check = True
+        args.action = None
     elif args.action in {"3", "prompt", "-p"}:
         args.prompt = True
         args.action = None
@@ -723,6 +728,7 @@ def main(argv=None) -> int:
         args.prompt,
         args.commit_prompt,
         args.diff,
+        args.check,
         args.clipboard,
         args.file,
         args.dry_run,
@@ -811,6 +817,13 @@ def main(argv=None) -> int:
 
     if not operations:
         return fail("No operations found")
+
+    if args.check:
+        ui.header(ROOT)
+        for idx, op in enumerate(operations, 1):
+            print(f"  {ui.palette.paint(str(idx), ui.palette.SLATE)}: {ui.describe_op(op)}")
+        ui.parse_check_success(len(operations))
+        return 0
 
     if args.no_run and any(op.command == "RUN" for op in operations):
         return fail("Plan contains RUN but --no-run was given. No files were modified.")

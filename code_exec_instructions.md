@@ -45,4 +45,5 @@ Delimiters sit on their own line; content is verbatim. Only `>>>`/`>>>>` close a
 - `FORBIDDEN_COMMAND` use allowed RUN · `UNKNOWN_COMMAND` bad name or prose inside block · `PATCH_FAILED` fix hunk context
 - Parse errors name the line (`line 12: …`, `Missing >>> for block opened at line 30`).
 
-`code-exec -c` builds a commit prompt from `git diff`.
+- `code-exec -c` builds a commit prompt from `git diff`.
+- `code-exec check` or `code-exec --check` validates plan parsing and syntax without touching or checking the filesystem.

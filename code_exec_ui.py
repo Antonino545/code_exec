@@ -431,6 +431,7 @@ class TerminalUI:
         lines.append(self._divider("Options"))
         row("--diff", "Show a unified diff before applying", c.CYAN)
         row("--dry-run", "Validate the plan without modifying files", c.CYAN)
+        row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
@@ -562,6 +563,15 @@ class TerminalUI:
         self._card("Dry run", "ok", [
             self._line("All operations simulated cleanly.", c.WHITE, bold=True),
             self._kv("Files", c.paint("unchanged", c.SLATE)),
+        ])
+
+    def parse_check_success(self, count: int) -> None:
+        c = self.palette
+        noun = "operation" if count == 1 else "operations"
+        self._card("Syntax Check Passed", "ok", [
+            self._line(f"Parsed {count} {noun} cleanly without errors.", c.WHITE, bold=True),
+            self._kv("Mode", c.paint("parser-only (debug)", c.CYAN)),
+            self._kv("Filesystem", c.paint("not touched / not queried", c.SLATE)),
         ])
 
     # ------------------------------------------------------------------ #
