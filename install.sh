@@ -43,28 +43,37 @@ else
     fi
 fi
 
-# 3. Determine binary destination
-BIN_DIR=""
+# 3. Determine binary destination (prefer writable user bin for clean piped curl install)
+mkdir -p "$HOME/.local/bin" 2>/dev/null || true
+
 if [ -w "/usr/local/bin" ]; then
     BIN_DIR="/usr/local/bin"
-elif [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+elif [ -d "$HOME/.local/bin" ] && [ -w "$HOME/.local/bin" ]; then
     BIN_DIR="$HOME/.local/bin"
 else
-    BIN_DIR="/usr/local/bin"
+    BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$BIN_DIR"
 fi
 
 TARGET="$BIN_DIR/code-exec"
 
 # 4. Generate launcher script
-LAUNCHER_SCRIPT="#!/usr/bin/env bash\nexec python3 \"$INSTALL_DIR/code_exec.py\" \"\$@\""
+LAUNCHER_SCRIPT="#!/usr/bin/env bash
+exec python3 \"$INSTALL_DIR/code_exec.py\" \"\$@\""
 
 if [ -w "$BIN_DIR" ]; then
-    printf "$LAUNCHER_SCRIPT\n" > "$TARGET"
+    printf "%s\n" "$LAUNCHER_SCRIPT" > "$TARGET"
     chmod +x "$TARGET"
 else
     echo -e "${AMBER}!${RESET} Writing to $TARGET requires administrative permissions:"
-    printf "$LAUNCHER_SCRIPT\n" | sudo tee "$TARGET" >/dev/null
-    sudo chmod +x "$TARGET"
+    # Use /dev/tty if stdin is tied to curl pipe
+    if [ -t 0 ]; then
+        printf "%s\n" "$LAUNCHER_SCRIPT" | sudo tee "$TARGET" >/dev/null
+        sudo chmod +x "$TARGET"
+    else
+        printf "%s\n" "$LAUNCHER_SCRIPT" | sudo tee "$TARGET" >/dev/null </dev/tty
+        sudo chmod +x "$TARGET" </dev/tty
+    fi
 fi
 
 echo -e "${GREEN}✓${RESET} Binary installed at: ${BOLD}$TARGET${RESET}"
