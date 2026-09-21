@@ -433,7 +433,7 @@ class TerminalUI:
         lines.append(self._divider("Commands"))
         row("code-exec", "Open the interactive launcher menu", c.WHITE)
         row("code-exec apply", "Apply the plan from your clipboard", c.WHITE)
-        row("code-exec export-context", "Export clean .context folder (files + tokens)", c.WHITE)
+        row("code-exec export-context", "Export clean context folder (files + tokens)", c.WHITE)
         row("code-exec undo", "Revert the last applied plan", c.WHITE)
         row("code-exec update", "Install the latest version from GitHub", c.WHITE)
         row("code-exec theme <name>", f"Set theme: {', '.join(c.themes)}", c.WHITE)
@@ -445,7 +445,7 @@ class TerminalUI:
         row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
-        row("--export-context", "Export clean .context folder (alias: export-concet)", c.CYAN)
+        row("--export-context", "Export clean context folder (alias: export-concet)", c.CYAN)
         row("--ignore-file <name>", "Specify custom ignore file (default: .code-exec-ignore)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
@@ -503,7 +503,7 @@ class TerminalUI:
             ("5", "Check updates", "install latest from GitHub", "update"),
             ("6", "Undo last plan", "revert file changes", "undo"),
             ("7", "Commit prompt", "git diff prompt to clipboard", "-c"),
-            ("8", "Export context", "clean project folder (.context)", "export-context"),
+            ("8", "Export context", "clean project folder (context)", "export-context"),
         ]
         lines = [""]
         for key, label, desc, flag in items:

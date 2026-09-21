@@ -17,6 +17,8 @@ DEFAULT_IGNORE_PATTERNS = [
     ".plan-only/",
     ".context",
     ".context/",
+    "context",
+    "context/",
     ".idea",
     ".idea/",
     ".vscode",
@@ -214,7 +216,7 @@ def estimate_tokens(text: str) -> int:
 
 def create_plan_folder(
     plan_text: str | None = None,
-    output_dirname: str = ".context",
+    output_dirname: str = "context",
     ignore_filename: str | None = ".code-exec-ignore",
     root: Path = ROOT,
     export_all: bool = True,
