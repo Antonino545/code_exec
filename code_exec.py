@@ -220,6 +220,55 @@ def execute(op: Operation, fs) -> str | None:
         return f"Deleted {args[0]}"
 
     if command in {"MOVE", "COPY", "RENAME"}:
+        pattern = args[0]
+        has_wildcard = any(ch in pattern for ch in ("*", "?", "[")) or pattern.startswith("regex:")
+
+        # Handle wildcard / regex pattern move
+        if command in {"MOVE", "COPY"} and has_wildcard:
+            dst_dir = safe_path(args[1], follow_leaf=False)
+            if fs.lexists(dst_dir) and not fs.is_dir(dst_dir):
+                raise OpError(f"Target '{args[1]}' exists but is not a directory for pattern {command.lower()}")
+
+            # Resolve matching files
+            matched_paths: list[Path] = []
+            if pattern.startswith("regex:"):
+                rx = re.compile(pattern[6:])
+                parent_dir = ROOT
+                for p in parent_dir.rglob("*"):
+                    rel_p = rel(p)
+                    if rx.search(rel_p) and not any(part in PROTECTED_NAMES for part in p.parts):
+                        matched_paths.append(p)
+            else:
+                for p in ROOT.glob(pattern):
+                    if not any(part in PROTECTED_NAMES for part in p.parts):
+                        matched_paths.append(p)
+
+            if not matched_paths:
+                raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]} - No files matched pattern '{pattern}'")
+
+            # Ensure destination directory exists
+            if not fs.lexists(dst_dir):
+                fs.mkdir(dst_dir)
+
+            moved_count = 0
+            for item in sorted(matched_paths):
+                item_safe = safe_path(rel(item), follow_leaf=False)
+                item_dest = dst_dir / item.name
+                if item_safe.resolve() == item_dest.resolve():
+                    continue
+                if item_safe.resolve() in item_dest.resolve().parents:
+                    continue
+                if fs.lexists(item_dest):
+                    continue
+                if command == "COPY":
+                    fs.copy(item_safe, item_dest)
+                else:
+                    fs.move(item_safe, item_dest)
+                moved_count += 1
+
+            verb = "Copied" if command == "COPY" else "Moved"
+            return f"{verb} {moved_count} file(s) matching '{pattern}' -> {args[1]}"
+
         src = safe_path(args[0], follow_leaf=(command == "COPY"))
         dst = safe_path(args[1], follow_leaf=False)
         if not fs.lexists(src):
@@ -286,7 +335,12 @@ def should_show_folder_tree(operations: list[Operation]) -> bool:
 def check_paths(op: Operation) -> None:
     if op.command in {"RUN", "COMMIT"}:
         return
-    for value in op.args:
+    for idx, value in enumerate(op.args):
+        # Skip path normalization on source wildcard patterns
+        if idx == 0 and op.command in {"MOVE", "COPY"} and any(ch in value for ch in ("*", "?", "[")):
+            continue
+        if idx == 0 and op.command in {"MOVE", "COPY"} and value.startswith("regex:"):
+            continue
         safe_path(value, follow_leaf=False)
 
 

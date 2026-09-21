@@ -23,7 +23,7 @@ Use 4+ backticks if content contains ```.
 - `MKDIR path` create folder/directory
 - `DELETE path` delete file or folder
 - `TOUCH path` · `CHMOD path +x|755`
-- `MOVE|COPY|RENAME src -> dst`
+- `MOVE|COPY|RENAME src -> dst` (supports glob/regex patterns e.g. `MOVE test* -> dest_folder` or `MOVE regex:^log_.* -> logs`)
 - `RUN cmd` only `python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`; no `-c/-i/-e`, `rm -rf`, `sudo`; always prefix shell commands with `RUN`
 - `COMMIT type(scope): description` last line after file changes
 

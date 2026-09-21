@@ -395,6 +395,29 @@ class TestResilienceAndSecurity(unittest.TestCase):
         self.assertIn("boundary anchors", match2.note)
         self.assertEqual(match2.line_range, (5, 69))
 
+    def test_wildcard_pattern_move(self):
+        fs = RealFS(timeout=10)
+        # Create multiple files matching pattern test*
+        (self.scratch / "test_a.txt").write_text("a", encoding="utf-8")
+        (self.scratch / "test_b.txt").write_text("b", encoding="utf-8")
+        (self.scratch / "other.txt").write_text("other", encoding="utf-8")
+
+        # Move test* into destination folder
+        op = Operation("MOVE", (f"{self.scratch_rel}/test*", f"{self.scratch_rel}/test_folder"))
+        msg = execute(op, fs)
+        self.assertIn("Moved 2 file(s)", msg)
+        self.assertTrue((self.scratch / "test_folder/test_a.txt").is_file())
+        self.assertTrue((self.scratch / "test_folder/test_b.txt").is_file())
+        self.assertTrue((self.scratch / "other.txt").is_file())
+
+        # Rollback
+        errs = fs.rollback()
+        self.assertEqual(errs, [])
+        self.assertTrue((self.scratch / "test_a.txt").is_file())
+        self.assertTrue((self.scratch / "test_b.txt").is_file())
+        self.assertFalse((self.scratch / "test_folder/test_a.txt").exists())
+        fs.cleanup()
+
     def test_safe_path_extended_traversal_attempts(self):
         traversals = [
             f"{self.scratch_rel}/././../../outside.py",
