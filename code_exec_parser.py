@@ -595,7 +595,7 @@ def _peek_pair(lines: list[str], i: int, command: str) -> tuple[str, str, int] |
         return None
     s = lines[j].strip()
     keyword = "MARKER" if command.startswith("INSERT") else "SEARCH"
-    if not (_DIFF_OPEN.match(s) or re.match(rf"^{keyword}\s*:?\s*(<{{1,5}})?\s*$", s, re.IGNORECASE)):
+    if not (_DIFF_OPEN.match(s) or re.match(rf"^{keyword}(?:\s*:?\s*<{1,5}|\s*:?\s*$)", s, re.IGNORECASE)):
         return None
     return _read_pair(lines, j, command)
 
@@ -716,6 +716,19 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             leading_skipped += 1
             i += 1
             continue
+
+        # If a bare SEARCH/MARKER block appears after an EDIT/INSERT operation,
+        # attach it to the preceding operation instead of failing as an unknown command.
+        if operations and operations[-1].command in _PAIR_COMMANDS:
+            last_cmd = operations[-1].command
+            kw = "MARKER" if last_cmd.startswith("INSERT") else "SEARCH"
+            if _DIFF_OPEN.match(line) or re.match(rf"^{kw}(?:\s*:?\s*<{1,5}|\s*:?\s*$)", line, re.IGNORECASE):
+                try:
+                    first, second, i = _read_pair(lines, i, last_cmd)
+                    operations.append(Operation(last_cmd, operations[-1].args, first, second))
+                    continue
+                except ValueError as exc:
+                    raise ValueError(f"line {lineno}: {exc}") from None
 
         try:
             operation, i = _parse_instruction(lines, i)
