@@ -214,6 +214,9 @@ class VirtualFS:
         self.copy(src, dst)
         self.delete(src)
 
+    def run(self, command: str):
+        pass
+
 
 class RealFS:
     """Applies operations for real and records how to undo each one."""
