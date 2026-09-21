@@ -330,6 +330,50 @@ class TestResilienceAndSecurity(unittest.TestCase):
         self.assertEqual(restored_mode & 0o777, 0o644)
         fs.cleanup()
 
+    def test_move_and_copy_self_nesting_and_identity_guards(self):
+        fs = RealFS(timeout=10)
+        folder = self.scratch / "base_dir"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "file.txt").write_text("content\n", encoding="utf-8")
+
+        # 1. Moving/copying a folder onto itself
+        with self.assertRaises(OpError) as ctx1:
+            execute(Operation("MOVE", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir")), fs)
+        self.assertIn("onto itself", str(ctx1.exception))
+
+        with self.assertRaises(OpError) as ctx2:
+            execute(Operation("COPY", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir")), fs)
+        self.assertIn("onto itself", str(ctx2.exception))
+
+        # 2. Moving/copying a folder into its own subfolder
+        with self.assertRaises(OpError) as ctx3:
+            execute(Operation("MOVE", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir/sub")), fs)
+        self.assertIn("into itself", str(ctx3.exception))
+
+        fs.cleanup()
+
+    def test_search_ambiguous_line_range_reporting(self):
+        doc = "line a\nhello world\nline b\nhello world\nline c\n"
+        with self.assertRaises(OpError) as ctx:
+            find_unique(doc, "hello world", "SEARCH", "ambiguous.py")
+        err_msg = str(ctx.exception)
+        self.assertIn("ERR|SEARCH_AMBIGUOUS|ambiguous.py|matched 2 times at [line 2, line 4]", err_msg)
+
+    def test_token_aware_python_matching(self):
+        doc = (
+            "def compute(a, b):\n"
+            "    value = 'sample_value'\n"
+            "    items = [1, 2, 3,]\n"
+            "    return items\n"
+        )
+        needle = (
+            'value = "sample_value"\n'
+            'items = [1, 2, 3]'
+        )
+        match = find_unique(doc, needle, "SEARCH", "test_app.py")
+        self.assertTrue(match.fuzzy)
+        self.assertIn("Python token normalization", match.note)
+
     def test_safe_path_extended_traversal_attempts(self):
         traversals = [
             f"{self.scratch_rel}/././../../outside.py",

@@ -224,10 +224,26 @@ def execute(op: Operation, fs) -> str | None:
         dst = safe_path(args[1], follow_leaf=False)
         if not fs.lexists(src):
             raise OpError(f"Source does not exist: {args[0]}")
+
+        # Check identity: prevent operating onto itself before checking dst existence
+        src_res = src.resolve()
+        dst_res = dst.resolve() if dst.exists() else dst.parent.resolve() / dst.name
+        if src_res == dst_res:
+            raise OpError(f"Cannot {command.lower()} {args[0]} onto itself")
+        if src.exists() and dst.exists():
+            try:
+                if os.path.samefile(src, dst):
+                    raise OpError(f"Cannot {command.lower()} {args[0]} onto itself")
+            except OSError:
+                pass
+
+        # Check nesting: prevent copying/moving a directory into its own child tree
+        if src_res in dst_res.parents or (fs.is_dir(src) and (src in dst.parents or src_res in dst_res.parents)):
+            raise OpError(f"Cannot {command.lower()} {args[0]} into itself")
+
         if fs.lexists(dst):
             raise OpError(f"Destination already exists: {args[1]}")
-        if src in dst.parents:
-            raise OpError(f"Cannot {command.lower()} {args[0]} into itself")
+
         if command == "COPY":
             fs.copy(src, dst)
             return f"Copied {args[0]} -> {args[1]}"
