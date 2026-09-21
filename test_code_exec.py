@@ -790,6 +790,32 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             preflight(ops)
         self.assertIn("ERR|CONFLICTING_OPERATIONS", str(ctx.exception))
 
+    def test_ui_render_panel_and_primitives(self):
+        from code_exec_ui import TerminalUI
+        import io
+        tui = TerminalUI()
+        buf = io.StringIO()
+        tui.render_panel(
+            title=" Test Panel ",
+            lines=["Row 1", "Row 2 with detail"],
+            file=buf,
+        )
+        output = buf.getvalue()
+        self.assertIn("Test Panel", output)
+        self.assertIn("Row 1", output)
+        self.assertIn("Row 2 with detail", output)
+        self.assertIn("╭", output)
+        self.assertIn("╰", output)
+
+    def test_ui_prompt_choice_default(self):
+        from unittest.mock import patch
+        from code_exec_ui import TerminalUI
+        tui = TerminalUI()
+        with patch("builtins.input", side_effect=["", "yes", KeyboardInterrupt]):
+            self.assertEqual(tui.prompt_choice("Confirm action", default="default_val"), "default_val")
+            self.assertEqual(tui.prompt_choice("Proceed", default="n"), "yes")
+            self.assertEqual(tui.prompt_choice("Interrupted", default="fallback"), "fallback")
+
 
 if __name__ == "__main__":
     unittest.main()
