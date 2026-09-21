@@ -22,9 +22,9 @@ COMMAND argument
 ## Supported Commands
 
 - `CREATE path <<< content >>>` — Create a new file (fails if file exists).
-- `EDIT path` — Surgically replace unique text in an existing file. Follow with `SEARCH <<<...>>>` and `REPLACE <<<...>>>` blocks.
+- `EDIT path` — Surgically replace unique text in an existing file. Follow with `SEARCH <<<...>>>` and `REPLACE <<<...>>>` blocks, or divider syntax (`<<<< ... ==== ... >>>>`).
 - `PATCH path <<< unified diff >>>` — Apply standard unified diff with line-drift and whitespace tolerance.
-- `REPLACE_ALL path` — Global replacement across whole file. Follow with `SEARCH <<<...>>>` and `REPLACE <<<...>>>` blocks.
+- `REPLACE_ALL path` — Global replacement across whole file. Follow with `SEARCH <<<...>>>` and `REPLACE <<<...>>>` blocks, or divider syntax (`<<<< ... ==== ... >>>>`).
 - `DELETE path` — Remove a file or directory.
 - `TOUCH path` — Create empty file or touch mtime without error if exists.
 - `CHMOD path mode` — Set file permissions (e.g. `CHMOD run.sh +x` or `CHMOD script.py 755`).

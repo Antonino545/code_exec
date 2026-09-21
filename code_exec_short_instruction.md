@@ -32,6 +32,7 @@ Allowed: CREATE, EDIT, PATCH, REPLACE_ALL, DELETE, MOVE, COPY, RENAME, MKDIR, TO
 * Use multiple EDITs for unrelated changes.
 * JSX: use unique classes/props/text, never generic tags.
 * Change only what is necessary; preserve formatting.
+* EDIT supports SEARCH/REPLACE blocks or divider syntax (<<<< ... ==== ... >>>>).
 * PATCH must use valid unified diff.
 
 ## Validation
