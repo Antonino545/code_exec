@@ -446,7 +446,7 @@ class TerminalUI:
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
         row("--export-context", "Export clean .context folder (alias: export-concet)", c.CYAN)
-        row("--ignore-file <name>", "Specify custom ignore file (default: .ignorefile)", c.CYAN)
+        row("--ignore-file <name>", "Specify custom ignore file (default: .code-exec-ignore)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
         row("--commit-prompt, -c", "Copy a git diff prompt for AI commits", c.CYAN)

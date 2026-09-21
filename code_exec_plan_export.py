@@ -41,31 +41,42 @@ DEFAULT_IGNORE_PATTERNS = [
 ]
 
 
-def load_ignore_patterns(root: Path = ROOT, ignore_filename: str = ".ignorefile") -> tuple[list[str], str]:
-    """Loads exclusion patterns from .ignorefile (or falls back to .gitignore or defaults)."""
-    ignore_path = root / ignore_filename
-    used_file = ignore_filename
-
+def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) -> tuple[list[str], str]:
+    """
+    Loads exclusion patterns, always preserving DEFAULT_IGNORE_PATTERNS (caches, temp, artifacts).
+    Checks candidate ignore files in priority order:
+      1. Explicitly provided filename (if valid)
+      2. .code-exec-ignore
+      3. code-exec-ignore
+      4. .ignorefile
+      5. .gitignore
+    """
     patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
+    candidates = [ignore_filename] if ignore_filename else []
+    candidates.extend([".code-exec-ignore", "code-exec-ignore", ".ignorefile", ".gitignore"])
 
-    if not ignore_path.is_file():
-        fallback = root / ".gitignore"
-        if fallback.is_file():
-            ignore_path = fallback
-            used_file = ".gitignore"
-        else:
-            used_file = "(built-in defaults)"
-            return patterns, used_file
+    found_path: Path | None = None
+    used_file = "(built-in defaults)"
 
-    try:
-        lines = ignore_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        for raw in lines:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            patterns.append(line)
-    except OSError:
-        pass
+    for candidate in candidates:
+        if not candidate:
+            continue
+        p = root / candidate
+        if p.is_file():
+            found_path = p
+            used_file = candidate
+            break
+
+    if found_path is not None:
+        try:
+            lines = found_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for raw in lines:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                patterns.append(line)
+        except OSError:
+            pass
 
     return patterns, used_file
 
@@ -154,7 +165,7 @@ def estimate_tokens(text: str) -> int:
 def create_plan_folder(
     plan_text: str | None = None,
     output_dirname: str = ".context",
-    ignore_filename: str = ".ignorefile",
+    ignore_filename: str | None = None,
     root: Path = ROOT,
     export_all: bool = True,
 ) -> dict[str, int | str]:

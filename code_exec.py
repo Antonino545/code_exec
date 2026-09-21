@@ -739,8 +739,8 @@ def main(argv=None) -> int:
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--export-context", "--export-concet", "--export-plan", "--context", dest="export_plan", action="store_true",
                         help="Export a clean project folder (.context) excluding temp/caches with file and token counts")
-    parser.add_argument("--ignore-file", default=".ignorefile",
-                        help="Path or name of custom ignore configuration file (default: .ignorefile)")
+    parser.add_argument("--ignore-file", default=None,
+                        help="Path or name of custom ignore configuration file (default: .code-exec-ignore)")
     parser.add_argument("--target-dir", default=".context",
                         help="Target output directory for clean plan export (default: .context)")
     parser.add_argument("--diff", action="store_true",
