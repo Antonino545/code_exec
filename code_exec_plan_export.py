@@ -15,6 +15,8 @@ DEFAULT_IGNORE_PATTERNS = [
     ".code_exec/",
     ".plan-only",
     ".plan-only/",
+    ".context",
+    ".context/",
     "node_modules",
     "node_modules/",
     "dist",
@@ -141,7 +143,7 @@ def extract_files_from_plan(plan_text: str) -> list[str]:
 
 def create_plan_folder(
     plan_text: str | None = None,
-    output_dirname: str = ".plan-only",
+    output_dirname: str = ".context",
     ignore_filename: str = ".ignorefile",
     root: Path = ROOT,
 ) -> dict[str, int | str]:

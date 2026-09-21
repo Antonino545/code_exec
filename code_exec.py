@@ -738,11 +738,11 @@ def main(argv=None) -> int:
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--export-plan", "--plan-only", dest="export_plan", action="store_true",
-                        help="Export a minimal clean project folder (.plan-only) containing only relevant files")
+                        help="Export a minimal clean project folder (.context) containing only relevant files")
     parser.add_argument("--ignore-file", default=".ignorefile",
                         help="Path or name of custom ignore configuration file (default: .ignorefile)")
-    parser.add_argument("--target-dir", default=".plan-only",
-                        help="Target output directory for clean plan export (default: .plan-only)")
+    parser.add_argument("--target-dir", default=".context",
+                        help="Target output directory for clean plan export (default: .context)")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
     parser.add_argument("--tree", action="store_true",
