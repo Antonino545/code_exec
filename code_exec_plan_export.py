@@ -187,7 +187,12 @@ def create_plan_folder(
     target_dir = root / output_dirname
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
-    # Collect candidate files (default to entire clean workspace)
+    # 1. Immediately wipe any existing context folder first to avoid scanning old exports
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Collect candidate files from clean workspace
     candidate_files: list[Path] = []
     requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
 
@@ -207,6 +212,12 @@ def create_plan_folder(
                 candidate_files.append(m_path)
     else:
         for p in root.rglob("*"):
+            # Never include target_dir even if partially created
+            try:
+                if target_dir in p.parents or p.resolve() == target_dir.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                pass
             if p.is_file():
                 candidate_files.append(p)
 
@@ -232,10 +243,6 @@ def create_plan_folder(
             total_bytes += file_path.stat().st_size
         except OSError:
             pass
-
-    if target_dir.exists():
-        shutil.rmtree(target_dir, ignore_errors=True)
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     for file_path in included_files:
         rel_path = file_path.relative_to(root)
