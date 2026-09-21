@@ -65,5 +65,3 @@ Delimiter rules:
 - `code-exec -c`: builds a commit prompt from `git diff`.
 - `code-exec check` / `--check`: validates plan parsing and syntax only, without touching or checking the filesystem.
 ````
-
-I kept it compact because it is sent to the AI on every plan, and every extra line costs tokens. If you'd like it even shorter, the Errors section is the safest to trim, since the engine's diagnostic already explains each error.
