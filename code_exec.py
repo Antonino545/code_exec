@@ -563,8 +563,8 @@ def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False) -> int:
-    fs = RealFS(timeout)
+def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False) -> int:
+    fs = VirtualFS() if dry_run else RealFS(timeout)
 
     if hasattr(signal, "SIGTERM"):
         try:
@@ -600,18 +600,23 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
     except CommandFailed as exc:
         copy_error_to_clipboard(str(exc))
-        ui.command_failed(str(exc), fs.backup_dir)
+        ui.command_failed(str(exc), fs.backup_dir if hasattr(fs, "backup_dir") else None)
         return 1
     except (Exception, KeyboardInterrupt) as exc:
         if not isinstance(exc, KeyboardInterrupt):
             copy_error_to_clipboard(str(exc))
         ui.apply_interrupted(exc)
-        count = len(fs.journal)
-        errors = fs.rollback()
-        ui.rollback_report(errors, count, fs.backup_dir, fs.ran_commands)
-        if not errors:
-            fs.cleanup()
+        if hasattr(fs, "journal"):
+            count = len(fs.journal)
+            errors = fs.rollback()
+            ui.rollback_report(errors, count, fs.backup_dir, fs.ran_commands)
+            if not errors:
+                fs.cleanup()
         return 1
+
+    if dry_run:
+        ui.dry_run()
+        return 0
 
     fs.save_backup_manifest()
     has_git = (ROOT / ".git").exists()
@@ -824,8 +829,7 @@ def main(argv=None) -> int:
         ui.show_diff(diff_text)
 
     if args.dry_run:
-        ui.dry_run()
-        return 0
+        return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True)
 
     if not args.yes:
         if not ui.confirm(diff_text=diff_text):

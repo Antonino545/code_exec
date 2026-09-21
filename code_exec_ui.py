@@ -556,8 +556,9 @@ class TerminalUI:
 
     def dry_run(self) -> None:
         c = self.palette
+        print(self.panel_bottom())
         self._card("Dry run", "ok", [
-            self._line("All checks passed. Plan is valid.", c.WHITE, bold=True),
+            self._line("All operations simulated cleanly.", c.WHITE, bold=True),
             self._kv("Files", c.paint("unchanged", c.SLATE)),
         ])
 

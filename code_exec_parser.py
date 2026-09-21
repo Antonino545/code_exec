@@ -31,18 +31,32 @@ COMMAND_ALIASES = {
 # --------------------------------------------------------------------------- #
 # Block delimiters
 #
-# The canonical form is  `<<<` ... `>>>`, but chats and markdown renderers often
-# eat or shorten them (`<`, `<<`, `>>`), so the parser accepts any run of 1-5
-# angle brackets as an *opener* and 2-5 as a *closer* (falling back to a single
-# `>` only when nothing else closes the block). Nesting is still tracked with
-# the canonical `<<<` so content that itself contains `<<<` ... `>>>` works.
+# Two block styles are accepted:
+#
+# 1. Keyword style (canonical)
+#        EDIT path
+#        SEARCH <<<        ...        >>>
+#        REPLACE <<<       ...        >>>
+#    Chats and markdown renderers often eat or shorten the brackets, so an
+#    opener may be 1-5 `<` and a closer 2-5 `>`. A lone `>` is deliberately NOT
+#    a closer: it is very common on its own line in JSX/HTML
+#    (`<div\n  className="x"\n>`), so accepting it would truncate blocks.
+#
+# 2. Conflict-marker style (git / aider), no SEARCH/REPLACE keywords
+#        EDIT path
+#        <<<<   (or <<<<<<< SEARCH)
+#        old text
+#        ====   (or =======)
+#        new text
+#        >>>>   (or >>>>>>> REPLACE)
 # --------------------------------------------------------------------------- #
-_OPEN_LINE = re.compile(r"^<{1,7}(?:\s*SEARCH)?$", re.IGNORECASE)
-_OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,7}$")
-_NEST_OPEN = re.compile(r"^<{3,7}$")
-_DIVIDER_LINE = re.compile(r"^={2,7}$")
-_CLOSE_STRICT = re.compile(r"^>{2,7}(?:\s*REPLACE)?$", re.IGNORECASE)
-_CLOSE_LOOSE = re.compile(r"^>{1,7}(?:\s*REPLACE)?$", re.IGNORECASE)
+_OPEN_LINE = re.compile(r"^<{1,5}$")          # opener on its own line
+_OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,5}$")  # opener at the end of a command line
+_NEST_OPEN = re.compile(r"^<{3,5}$")          # nested block inside content
+_CLOSE_STRICT = re.compile(r"^>{2,5}$")
+_DIFF_OPEN = re.compile(r"^<{3,}\s*(?:SEARCH|ORIGINAL|OLD|MARKER)?\s*:?\s*$", re.IGNORECASE)
+_DIFF_SEP = re.compile(r"^={3,}\s*$")
+_DIFF_CLOSE = re.compile(r"^>{3,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", re.IGNORECASE)
 _ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
 
 
@@ -121,7 +135,6 @@ def extract_plan(text: str) -> str:
     lines = sanitized.split("\n")
 
     plans: list[str] = []
-    fallback_plans: list[str] = []
     unclosed: list[str] = []
 
     i = 0
@@ -180,7 +193,8 @@ def extract_plan(text: str) -> str:
                             i += 1
                             break
 
-                block_lines.append(curr)
+                if is_code_exec:
+                    block_lines.append(curr)
                 i += 1
 
             if is_code_exec:
@@ -188,16 +202,9 @@ def extract_plan(text: str) -> str:
                     plans.append("\n".join(block_lines))
                 else:
                     unclosed.append("unclosed code_exec block")
-            elif found_end and block_lines:
-                first_cand = next((ln.strip().split()[0].upper().rstrip(":") for ln in block_lines if ln.strip() and not ln.strip().startswith("#")), "")
-                if first_cand in COMMANDS or first_cand in COMMAND_ALIASES:
-                    fallback_plans.append("\n".join(block_lines))
             continue
 
         i += 1
-
-    if not plans and len(fallback_plans) == 1:
-        plans = fallback_plans
 
     if unclosed:
         if len(plans) == 0:
@@ -255,54 +262,8 @@ def _read_delimited(lines: list[str], start: int) -> tuple[str, int]:
     """Read block content beginning at `start` (the opener line is already consumed)."""
     k = _find_close(lines, start, _CLOSE_STRICT)
     if k < 0:
-        k = _find_close(lines, start, _CLOSE_LOOSE)  # tolerate a lone `>` closer
-    if k < 0:
         raise ValueError(f"Missing >>> for block opened at line {start}")
     return "\n".join(lines[start:k]), k + 1
-
-
-def _has_divider(lines: list[str], start: int) -> bool:
-    """Check whether an opening block contains an unnested ==== divider."""
-    depth = 1
-    for k in range(start, len(lines)):
-        line_str = lines[k].strip()
-        if _NEST_OPEN.match(line_str):
-            depth += 1
-        elif depth == 1 and _DIVIDER_LINE.match(line_str):
-            return True
-        elif _CLOSE_STRICT.match(line_str) or _CLOSE_LOOSE.match(line_str):
-            depth -= 1
-            if depth == 0:
-                return False
-    return False
-
-
-def _read_divided_block(lines: list[str], start: int) -> tuple[str, str, int]:
-    """Read a dual <<<< ... ==== ... >>>> block and return (search, replace, next_line_index)."""
-    depth = 1
-    divider_idx = -1
-    close_idx = -1
-
-    for k in range(start, len(lines)):
-        line_str = lines[k].strip()
-        if _NEST_OPEN.match(line_str):
-            depth += 1
-        elif depth == 1 and _DIVIDER_LINE.match(line_str) and divider_idx == -1:
-            divider_idx = k
-        elif _CLOSE_STRICT.match(line_str) or (divider_idx != -1 and _CLOSE_LOOSE.match(line_str)):
-            depth -= 1
-            if depth == 0:
-                close_idx = k
-                break
-
-    if divider_idx == -1:
-        raise ValueError(f"Missing ==== divider for block opened at line {start}")
-    if close_idx == -1:
-        raise ValueError(f"Missing >>>> closer for block opened at line {start}")
-
-    search = "\n".join(lines[start:divider_idx])
-    replace = "\n".join(lines[divider_idx + 1:close_idx])
-    return search, replace, close_idx + 1
 
 
 def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[str, int]:
@@ -338,8 +299,32 @@ def expect_keyword(lines: list[str], i: int, keyword: str, command: str) -> tupl
     if m:
         return i + 1, bool(m.group(1))
     raise ValueError(
-        f"{command} requires {keyword} <<< ... >>> (line {i + 1}, found {line[:40]!r})"
+        f"{command} requires {keyword} <<< ... >>> or a <<<< / ==== / >>>> block "
+        f"(line {i + 1}, found {line[:40]!r})"
     )
+
+
+def _try_diff_pair(lines: list[str], i: int, command: str) -> tuple[str, str, int] | None:
+    """
+    Read a conflict-marker pair (`<<<<` old `====` new `>>>>`) starting at line `i`.
+    Returns (first, second, next_index), or None if the next line is not an opener.
+    The closer is located first so a stray `====` in a later operation is never mistaken
+    for this block's separator.
+    """
+    j = i
+    while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
+        j += 1
+    if j >= len(lines) or not _DIFF_OPEN.match(lines[j].strip()):
+        return None
+
+    start = j + 1
+    end = next((k for k in range(start, len(lines)) if _DIFF_CLOSE.match(lines[k].strip())), -1)
+    if end < 0:
+        raise ValueError(f"{command}: missing >>>> for block opened at line {j + 1}")
+    sep = next((k for k in range(start, end) if _DIFF_SEP.match(lines[k].strip())), -1)
+    if sep < 0:
+        raise ValueError(f"{command}: missing ==== separator in block opened at line {j + 1}")
+    return "\n".join(lines[start:sep]), "\n".join(lines[sep + 1:end]), end + 1
 
 
 def _unwrap(text: str) -> str:
@@ -353,10 +338,14 @@ def _unwrap(text: str) -> str:
 
 
 def _resolve_command(raw: str, rest: str) -> str | None:
-    """Canonical command for `raw` (case-insensitive) or None."""
+    """Canonical command for `raw` (case-insensitive, aliases allowed) or None."""
     upper = raw.strip().upper()
     if upper in COMMANDS:
         return upper
+    alias = COMMAND_ALIASES.get(upper)
+    # `rm -rf x` / `cp -r a b` are shell commands, not plan commands.
+    if alias and not rest.lstrip().startswith("-"):
+        return alias
     return None
 
 
@@ -415,25 +404,10 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         return Operation(command, (path,), content), i
 
     if command in {"EDIT", "REPLACE_ALL"}:
-        j = i
-        while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
-            j += 1
-
-        is_divided = False
-        start_line = i
-        if inline_block:
-            is_divided = True
-        elif j < len(lines):
-            line_j = lines[j].strip()
-            if re.match(r"^<{4,7}", line_j) or (_OPEN_LINE.match(line_j) and _has_divider(lines, j + 1)):
-                is_divided = True
-                start_line = j + 1
-                i = j + 1
-
-        if is_divided:
-            search, replace, i = _read_divided_block(lines, start_line)
+        pair = _try_diff_pair(lines, i, command)
+        if pair:
+            search, replace, i = pair
             return Operation(command, (path,), search, replace), i
-
         i, search_inline = expect_keyword(lines, i, "SEARCH", command)
         search, i = read_block(lines, i, inline_started=search_inline)
         i, replace_inline = expect_keyword(lines, i, "REPLACE", command)
@@ -441,6 +415,10 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         return Operation(command, (path,), search, replace), i
 
     # INSERT_BEFORE / INSERT_AFTER
+    pair = _try_diff_pair(lines, i, command)
+    if pair:
+        marker, content, i = pair
+        return Operation(command, (path,), marker, content), i
     i, marker_inline = expect_keyword(lines, i, "MARKER", command)
     marker, i = read_block(lines, i, inline_started=marker_inline)
     i, content_inline = expect_keyword(lines, i, "CONTENT", command)
