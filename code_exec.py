@@ -252,6 +252,21 @@ def execute(op: Operation, fs) -> str | None:
     raise OpError(f"Unsupported command: {command}")
 
 
+def should_show_folder_tree(operations: list[Operation]) -> bool:
+    for op in operations:
+        cmd = op.command
+        if cmd in {"MKDIR", "MOVE", "RENAME", "COPY"}:
+            return True
+        if cmd == "DELETE" and op.args:
+            path_str = str(op.args[0])
+            if "/" in path_str or (ROOT / path_str).is_dir():
+                return True
+        if cmd in {"CREATE", "TOUCH"} and op.args:
+            if "/" in str(op.args[0]):
+                return True
+    return False
+
+
 def check_paths(op: Operation) -> None:
     if op.command in {"RUN", "COMMIT"}:
         return
@@ -654,6 +669,8 @@ def main(argv=None) -> int:
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
+    parser.add_argument("--tree", action="store_true",
+                        help="Display the proposed directory tree structure")
     parser.add_argument("--check", action="store_true",
                         help="Debug mode: parse and validate syntax only without reading or checking files")
     parser.add_argument("--clipboard", action="store_true",
@@ -728,6 +745,7 @@ def main(argv=None) -> int:
         args.prompt,
         args.commit_prompt,
         args.diff,
+        args.tree,
         args.check,
         args.clipboard,
         args.file,
@@ -822,6 +840,8 @@ def main(argv=None) -> int:
         ui.header(ROOT)
         for idx, op in enumerate(operations, 1):
             print(f"  {ui.palette.paint(str(idx), ui.palette.SLATE)}: {ui.describe_op(op)}")
+        if args.tree or should_show_folder_tree(operations):
+            ui.show_tree(operations)
         ui.parse_check_success(len(operations))
         return 0
 
@@ -836,6 +856,9 @@ def main(argv=None) -> int:
     ui.header(ROOT)
     ui.show_plan(operations, reason, deferred)
 
+    if args.tree or should_show_folder_tree(operations):
+        ui.show_tree(operations)
+
     diff_text = generate_plan_diff(operations)
     if args.diff:
         ui.show_diff(diff_text)
@@ -844,7 +867,7 @@ def main(argv=None) -> int:
         return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True)
 
     if not args.yes:
-        if not ui.confirm(diff_text=diff_text):
+        if not ui.confirm(diff_text=diff_text, on_view_tree=(lambda: ui.show_tree(operations)) if operations else None):
             ui.cancelled()
             return 0
 

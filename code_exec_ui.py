@@ -131,6 +131,15 @@ def _fit(text: str, width: int) -> str:
     return "".join(out) + "…" + reset
 
 
+class _TreeNode:
+    def __init__(self, name: str, is_dir: bool = False):
+        self.name = name
+        self.is_dir = is_dir
+        self.action = ""
+        self.extra = ""
+        self.children: dict[str, _TreeNode] = {}
+
+
 class TerminalUI:
     """Claude Code inspired TUI with responsive boxed cards and status panels."""
 
@@ -430,6 +439,7 @@ class TerminalUI:
 
         lines.append(self._divider("Options"))
         row("--diff", "Show a unified diff before applying", c.CYAN)
+        row("--tree", "Show the proposed folder/directory structure", c.CYAN)
         row("--dry-run", "Validate the plan without modifying files", c.CYAN)
         row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
@@ -527,12 +537,168 @@ class TerminalUI:
         prompt = c.paint("❯", c.CYAN, bold=True)
         print(self.panel_row(f"  {prompt} {c.paint(cmd, c.WHITE)}"), flush=True)
 
-    def confirm(self, diff_text: str | None = None) -> bool:
-        hint = "Apply these changes? [y/N/v] (v: view diff)" if diff_text else "Apply these changes? [y/N]"
+    def build_tree_lines(self, operations: list[Operation]) -> list[str]:
+        root_nodes: dict[str, _TreeNode] = {}
+
+        for op in operations:
+            cmd = op.command
+            args = op.args
+            if cmd in {"RUN", "COMMIT"} or not args:
+                continue
+
+            if cmd in {"MOVE", "COPY", "RENAME"}:
+                src = str(args[0])
+                dst = str(args[1])
+                target_is_dir = src.endswith("/") or dst.endswith("/")
+                action = "move" if cmd in {"MOVE", "RENAME"} else "copy"
+                extra = f"from {src}"
+                raw_path = dst
+            elif cmd == "CHMOD":
+                raw_path = str(args[0])
+                target_is_dir = False
+                action = ""
+                extra = str(args[1]) if len(args) > 1 else ""
+            elif cmd == "DELETE":
+                raw_path = str(args[0])
+                target_is_dir = raw_path.endswith("/")
+                action = "delete"
+                extra = ""
+            elif cmd == "MKDIR":
+                raw_path = str(args[0])
+                target_is_dir = True
+                action = "mkdir"
+                extra = ""
+            elif cmd in {"CREATE", "TOUCH"}:
+                raw_path = str(args[0])
+                target_is_dir = False
+                action = "create"
+                extra = ""
+            else:
+                raw_path = str(args[0])
+                target_is_dir = False
+                action = "edit"
+                extra = ""
+
+            clean = raw_path.strip().replace("\\", "/").rstrip("/")
+            parts = [p for p in clean.split("/") if p and p != "."]
+            if not parts:
+                continue
+
+            curr = root_nodes
+            for i, part in enumerate(parts):
+                is_leaf = (i == len(parts) - 1)
+                part_is_dir = target_is_dir if is_leaf else True
+                if part not in curr:
+                    curr[part] = _TreeNode(part, is_dir=part_is_dir)
+                node = curr[part]
+                if part_is_dir:
+                    node.is_dir = True
+                if is_leaf:
+                    if action:
+                        node.action = action
+                    if extra:
+                        node.extra = extra
+                curr = node.children
+
+        if not root_nodes:
+            return []
+
+        c = self.palette
+
+        def render_children(children: dict[str, _TreeNode], prefix: str = "") -> list[str]:
+            out = []
+            sorted_nodes = sorted(
+                children.values(),
+                key=lambda n: (0 if n.is_dir else 1, n.name.lower())
+            )
+            for idx, child in enumerate(sorted_nodes):
+                is_last = (idx == len(sorted_nodes) - 1)
+                branch = "└── " if is_last else "├── "
+                next_prefix = prefix + ("    " if is_last else "│   ")
+
+                branch_str = c.paint(prefix + branch, c.SLATE)
+                if child.is_dir:
+                    name_color = c.RED if child.action == "delete" else c.CYAN
+                    name_str = c.paint(child.name + "/", name_color, bold=True)
+                else:
+                    name_color = c.RED if child.action == "delete" else c.WHITE
+                    name_str = c.paint(child.name, name_color)
+
+                tags = []
+                if child.action == "delete":
+                    tags.append(c.paint("deleted", c.RED))
+                elif child.action == "move":
+                    tags.append(c.paint(child.extra or "moved", c.CYAN))
+                elif child.action == "copy":
+                    tags.append(c.paint(child.extra or "copied", c.CYAN))
+                elif child.extra:
+                    tags.append(c.paint(child.extra, c.GREEN if "+" in child.extra else c.SLATE))
+
+                tag_str = f" {c.paint('(', c.SLATE)}{', '.join(tags)}{c.paint(')', c.SLATE)}" if tags else ""
+                out.append(f"  {branch_str}{name_str}{tag_str}")
+
+                if child.children:
+                    out.extend(render_children(child.children, next_prefix))
+            return out
+
+        lines: list[str] = []
+        sorted_roots = sorted(
+            root_nodes.values(),
+            key=lambda n: (0 if n.is_dir else 1, n.name.lower())
+        )
+
+        for idx, root in enumerate(sorted_roots):
+            if idx > 0:
+                lines.append("")
+            tags = []
+            if root.action == "delete":
+                tags.append(c.paint("deleted", c.RED))
+            elif root.action == "move":
+                tags.append(c.paint(root.extra or "moved", c.CYAN))
+            elif root.action == "copy":
+                tags.append(c.paint(root.extra or "copied", c.CYAN))
+            elif root.extra:
+                tags.append(c.paint(root.extra, c.GREEN if "+" in root.extra else c.SLATE))
+            tag_str = f" {c.paint('(', c.SLATE)}{', '.join(tags)}{c.paint(')', c.SLATE)}" if tags else ""
+
+            if root.is_dir:
+                root_color = c.RED if root.action == "delete" else c.CYAN
+                lines.append(f"  {c.paint(root.name + '/', root_color, bold=True)}{tag_str}")
+                if root.children:
+                    lines.extend(render_children(root.children, prefix="  "))
+            else:
+                lines.append(f"  {c.paint(root.name, c.WHITE)}{tag_str}")
+
+        return lines
+
+    def show_tree(self, operations: list[Operation]) -> None:
+        lines = self.build_tree_lines(operations)
+        if not lines:
+            return
+        self.render_panel(title=self._title("Directory structure", "info"), lines=[""] + lines + [""])
+        print()
+
+    def confirm(self, diff_text: str | None = None, on_view_tree=None) -> bool:
+        options = ["y/N"]
+        hints = []
+        if diff_text:
+            options.append("v")
+            hints.append("v: view diff")
+        if on_view_tree:
+            options.append("t")
+            hints.append("t: view tree")
+
+        hint_body = "/".join(options)
+        hint_extra = f" ({', '.join(hints)})" if hints else ""
+        prompt_str = f"Apply these changes? [{hint_body}]{hint_extra}"
+
         while True:
-            answer = self.prompt_choice(hint, default="n").lower()
+            answer = self.prompt_choice(prompt_str, default="n").lower()
             if answer in {"v", "view"} and diff_text:
                 self.show_diff(diff_text)
+                continue
+            if answer in {"t", "tree"} and on_view_tree:
+                on_view_tree()
                 continue
             return answer in {"y", "yes"}
 
