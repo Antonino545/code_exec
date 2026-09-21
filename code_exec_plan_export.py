@@ -47,6 +47,46 @@ DEFAULT_IGNORE_PATTERNS = [
     "__pycache__",
     "__pycache__/",
     ".env*",
+    # Lockfiles & package manager state
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "poetry.lock",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    # OS & editor metadata
+    ".DS_Store",
+    "Thumbs.db",
+    # Minified assets & sourcemaps
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    # Archives & binaries
+    "*.tar",
+    "*.tar.gz",
+    "*.zip",
+    "*.rar",
+    "*.7z",
+    "*.gz",
+    "*.pdf",
+    # Media & fonts
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.svg",
+    "*.webp",
+    "*.mp3",
+    "*.mp4",
+    "*.mov",
+    "*.avi",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
 ]
 
 
