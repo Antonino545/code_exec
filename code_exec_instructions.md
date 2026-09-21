@@ -35,11 +35,15 @@ Delimiters sit on their own line; content is verbatim. Only `>>>`/`>>>>` close a
 - Folders: Use `MKDIR path` to create folders and `DELETE path` to delete files or folders.
 - No contradictory ops on one file (double `CREATE`, edit after `DELETE`).
 - SEARCH must exist verbatim and match exactly once: 3–6 lines, unique anchor (max 60 lines/4000 chars). Use several small blocks, not one big one. In JSX/HTML never search bare tags (`<div>`, `return (`); use unique classes, props, text. REPLACE only what must change; keep indentation.
+- **Boundary Anchor for Large Blocks (Token Saver)**: When replacing an entire large function, class, or section (>20-30 lines), DO NOT output the full middle body. Output ONLY an 8-line boundary anchor:
+  - First 4 lines (signature / opening anchor)
+  - Last 4 lines (closing / return anchor)
+  The engine uses boundary anchor fallback to match and replace the full range, preventing token waste.
 - Matching tolerates whitespace/indentation but never code, strings or attributes.
 
 ## Errors (a diagnostic is copied to the clipboard; fix and resend the whole plan)
 - `PLAN_NOT_FOUND` no closed block or cut off · `MULTIPLE_PLANS` send one block
-- `SEARCH_NOT_FOUND` copy real lines from the diff (`+` = file) · `SEARCH_AMBIGUOUS` add 1–3 context lines · `SEARCH_TOO_BIG` shrink
+- `SEARCH_NOT_FOUND` copy real lines from the diff (`+` = file) · `SEARCH_AMBIGUOUS` add 1–3 context lines · `SEARCH_TOO_BIG` shrink or use boundary anchors
 - `CREATE_EXISTS` use EDIT · `FILE_NOT_FOUND`/`DELETE_NOT_FOUND` check path or CREATE
 - `INVALID_PATH`/`FILE_PROTECTED` don't modify · `CONFLICTING_OPERATIONS` merge/reorder
 - `FORBIDDEN_COMMAND` use allowed RUN · `UNKNOWN_COMMAND` bad name or prose inside block · `PATCH_FAILED` fix hunk context
