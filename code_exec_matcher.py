@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import difflib
+import io
 import re
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -149,6 +151,114 @@ def _find_high_similarity_match(
     return (start_offset, end_offset, best_start, best_end, best_r)
 
 
+def _tokenize_python_line(line_str: str) -> list[tuple[int, str]]:
+    """Extract semantic tokens from a single Python line, normalizing quotes and trailing commas."""
+    stripped = line_str.strip()
+    if not stripped or stripped.startswith("#"):
+        return []
+    try:
+        raw_tokens = list(tokenize.tokenize(io.BytesIO(stripped.encode("utf-8")).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        norm = re.sub(r"#.*$", "", stripped)
+        norm = re.sub(r",\s*([\]\}\)])", r"\1", norm)
+        norm = re.sub(r"^('''|\"\"\"|'|\")|('''|\"\"\"|'|\")$", "", norm)
+        return [(tokenize.NAME, norm.strip())]
+
+    tokens: list[tuple[int, str]] = []
+    for t in raw_tokens:
+        if t.type in (tokenize.ENCODING, tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.ENDMARKER):
+            continue
+        val = t.string
+        if t.type == tokenize.STRING:
+            if (val.startswith(("'", '"')) and len(val) >= 2) or (val.startswith(("'''", '"""')) and len(val) >= 6):
+                val = re.sub(r"^('''|\"\"\"|'|\")|('''|\"\"\"|'|\")$", "", val)
+        tokens.append((t.type, val))
+
+    cleaned: list[tuple[int, str]] = []
+    for idx, (ttype, sval) in enumerate(tokens):
+        if ttype == tokenize.OP and sval == ",":
+            if idx + 1 < len(tokens) and tokens[idx + 1][1] in ("]", "}", ")"):
+                continue
+        cleaned.append((ttype, sval))
+    return cleaned
+
+
+def _match_python_tokens(doc: str, needle: str) -> list[tuple[int, int, int, int]]:
+
+    want_raw = [ln for ln in needle.split("\n") if ln.strip()]
+    if not want_raw:
+        return []
+
+    want_toks = [_tokenize_python_line(ln) for ln in want_raw]
+    want_toks = [t for t in want_toks if t]
+    if not want_toks:
+        return []
+
+    doc_lines = doc.split("\n")
+    offsets = []
+    pos = 0
+    for line in doc_lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    size = len(want_toks)
+    spans = []
+    for i in range(len(doc_lines) - size + 1):
+        window_toks = [_tokenize_python_line(doc_lines[i + j]) for j in range(size)]
+        if window_toks == want_toks:
+            last = i + size - 1
+            tail = doc_lines[last]
+            if tail.endswith("\r"):
+                tail = tail[:-1]
+            end_pos = offsets[last] + len(tail)
+            spans.append((offsets[i], end_pos, i, last))
+
+    return spans
+
+
+def _match_js_tokens(doc: str, needle: str) -> list[tuple[int, int, int, int]]:
+    """
+    Token-aware lexical normalization for JS/TS code:
+    normalizes quotes, ignores optional trailing commas, and collapses operator spacing.
+    """
+    def js_norm_line(s: str) -> str:
+        s = re.sub(r"//.*$", "", s)
+        s = re.sub(r"/\*.*?\*/", "", s)
+        s = s.replace('"', "'").replace("`", "'")
+        s = re.sub(r",\s*([}\]])", r"\1", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    doc_lines = doc.split("\n")
+    want_raw = [ln for ln in needle.split("\n") if ln.strip()]
+    if not want_raw:
+        return []
+
+    want_norm = [js_norm_line(ln) for ln in want_raw if js_norm_line(ln)]
+    if not want_norm:
+        return []
+
+    offsets = []
+    pos = 0
+    for line in doc_lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    size = len(want_norm)
+    spans = []
+    for i in range(len(doc_lines) - size + 1):
+        window_norm = [js_norm_line(doc_lines[i + j]) for j in range(size)]
+        if window_norm == want_norm:
+            last = i + size - 1
+            tail = doc_lines[last]
+            if tail.endswith("\r"):
+                tail = tail[:-1]
+            end_pos = offsets[last] + len(tail)
+            spans.append((offsets[i], end_pos, i, last))
+
+    return spans
+
+
 def _find_closest_match(doc: str, needle: str) -> str:
     """Scan file with a sliding window to generate a diagnostic diff for the closest candidate."""
     doc_lines = doc.split("\n")
@@ -215,6 +325,14 @@ MAX_SEARCH_LINES = 60
 MAX_SEARCH_CHARS = 4000
 
 
+def _format_spans_error(err_prefix: str, target: str, spans: list[tuple[int, int, int, int]]) -> OpError:
+    locations = [f"lines {s + 1}-{e + 1}" if s != e else f"line {s + 1}" for _, _, s, e in spans]
+    loc_str = ", ".join(locations[:6])
+    if len(locations) > 6:
+        loc_str += f", ... (+{len(locations) - 6} more)"
+    return OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|matched {len(spans)} times at [{loc_str}]")
+
+
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness:
@@ -246,7 +364,18 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start = doc.index(needle)
         return MatchResult(start, start + len(needle), "", False, None)
     if count > 1:
-        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{count}")
+        doc_lines = doc.split("\n")
+        spans = []
+        start_idx = 0
+        while True:
+            pos = doc.find(needle, start_idx)
+            if pos == -1:
+                break
+            s_line = doc[:pos].count("\n")
+            e_line = doc[: pos + len(needle)].count("\n")
+            spans.append((pos, pos + len(needle), s_line, e_line))
+            start_idx = pos + 1
+        raise _format_spans_error(err_prefix, target, spans)
 
     doc_lines = doc.split("\n")
 
@@ -268,7 +397,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched ignoring trailing whitespace)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
+        raise _format_spans_error(err_prefix, target, spans)
 
     # ---- Tier 3: Indentation tolerant ----
     want_indent = [ln.strip() for ln in want_raw]
@@ -277,7 +406,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with indentation tolerance)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
+        raise _format_spans_error(err_prefix, target, spans)
 
     # ---- Tier 4: Harmless whitespace normalization (spaces collapsed) ----
     want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
@@ -286,7 +415,7 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with whitespace normalization)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
+        raise _format_spans_error(err_prefix, target, spans)
 
     # ---- Tier 5: JSX-aware line match ----
     want_jsx = [_normalize_jsx_line(ln) for ln in want_raw]
@@ -295,9 +424,27 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         start, end, i, last = spans[0]
         return MatchResult(start, end, " (matched with JSX normalization)", True, (i, last))
     if len(spans) > 1:
-        raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|{len(spans)}")
+        raise _format_spans_error(err_prefix, target, spans)
 
-    # ---- Tier 6: High-similarity fuzzy match (>= 90%) ----
+    # ---- Tier 6: Language token-aware matching (Python / JS / TS) ----
+    target_lower = target.lower()
+    if target_lower.endswith(".py"):
+        py_spans = _match_python_tokens(doc, needle)
+        if len(py_spans) == 1:
+            start, end, i, last = py_spans[0]
+            return MatchResult(start, end, " (matched with Python token normalization)", True, (i, last))
+        if len(py_spans) > 1:
+            raise _format_spans_error(err_prefix, target, py_spans)
+
+    if target_lower.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
+        js_spans = _match_js_tokens(doc, needle)
+        if len(js_spans) == 1:
+            start, end, i, last = js_spans[0]
+            return MatchResult(start, end, " (matched with JS/TS token normalization)", True, (i, last))
+        if len(js_spans) > 1:
+            raise _format_spans_error(err_prefix, target, js_spans)
+
+    # ---- Tier 7: High-similarity fuzzy match (>= 90%) ----
     fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90, capture_newline=capture_nl)
     if fuzzy is not None:
         start, end, s_line, e_line, sim = fuzzy
