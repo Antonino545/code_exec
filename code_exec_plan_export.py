@@ -41,7 +41,7 @@ DEFAULT_IGNORE_PATTERNS = [
 ]
 
 
-def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) -> tuple[list[str], str]:
+def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = ".code-exec-ignore") -> tuple[list[str], str]:
     """
     Loads exclusion patterns, always preserving DEFAULT_IGNORE_PATTERNS (caches, temp, artifacts).
     Checks candidate ignore files in priority order:
@@ -52,7 +52,9 @@ def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) 
       5. .gitignore
     """
     patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
-    candidates = [ignore_filename] if ignore_filename else []
+    candidates: list[str] = []
+    if ignore_filename and ignore_filename != ".code-exec-ignore":
+        candidates.append(ignore_filename)
     candidates.extend([".code-exec-ignore", "code-exec-ignore", ".ignorefile", ".gitignore"])
 
     found_path: Path | None = None
@@ -165,7 +167,7 @@ def estimate_tokens(text: str) -> int:
 def create_plan_folder(
     plan_text: str | None = None,
     output_dirname: str = ".context",
-    ignore_filename: str | None = None,
+    ignore_filename: str | None = ".code-exec-ignore",
     root: Path = ROOT,
     export_all: bool = True,
 ) -> dict[str, int | str]:
