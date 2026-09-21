@@ -5,7 +5,9 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
+from typing import Callable
 
 from code_exec_types import COMMANDS, Operation, OpError, clean_path
 
@@ -29,6 +31,48 @@ COMMAND_ALIASES = {
 }
 
 # --------------------------------------------------------------------------- #
+# Tunables
+# --------------------------------------------------------------------------- #
+
+# Several `code_exec` blocks in one reply are merged in order (with a warning).
+# Set to False to restore the old hard ERR|MULTIPLE_PLANS failure.
+MERGE_MULTIPLE_PLANS = True
+
+# A reply with no plan at all (a normal answer, a question...) is not an error: extract_plan
+# returns "" and parse_operations("") returns []. A plan that was started but is broken or cut
+# off still raises. Set to True to restore the old hard ERR|PLAN_NOT_FOUND.
+NO_PLAN_IS_ERROR = False
+
+# Print tolerance warnings (through code_exec_ui when available). Tests turn this off.
+PRINT_WARNINGS = True
+
+# Everything the parser tolerated ("restored escaped delimiters", "ignored prose", ...).
+# Read and clear it with take_warnings().
+WARNINGS: list[str] = []
+_PRINTED: set[str] = set()
+
+
+def _warn(message: str) -> None:
+    if message not in WARNINGS:
+        WARNINGS.append(message)
+    if PRINT_WARNINGS and message not in _PRINTED:
+        _PRINTED.add(message)
+        try:
+            from code_exec_ui import ui
+
+            ui.warn(message)
+        except Exception:  # noqa: BLE001 - UI is optional
+            print(f"  ▲ {message}", file=sys.stderr)
+
+
+def take_warnings() -> list[str]:
+    """Return and clear the tolerance warnings collected since the last call."""
+    out = WARNINGS[:]
+    WARNINGS.clear()
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Block delimiters
 #
 # Two block styles are accepted:
@@ -49,6 +93,8 @@ COMMAND_ALIASES = {
 #        ====   (or =======)
 #        new text
 #        >>>>   (or >>>>>>> REPLACE)
+#
+# Either style can be repeated under one command to express several edits.
 # --------------------------------------------------------------------------- #
 _OPEN_LINE = re.compile(r"^<{1,5}$")          # opener on its own line
 _OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,5}$")  # opener at the end of a command line
@@ -59,6 +105,19 @@ _DIFF_SEP = re.compile(r"^={3,}\s*$")
 _DIFF_CLOSE = re.compile(r"^>{3,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", re.IGNORECASE)
 _ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
 
+_PAIR_COMMANDS = {"EDIT", "REPLACE_ALL", "INSERT_BEFORE", "INSERT_AFTER"}
+_BLOCK_KEYWORDS = {"SEARCH", "REPLACE", "MARKER", "CONTENT", "THINK", "END_THINK", "END_OF_FILE"}
+_SHELL_WORDS = {
+    "npm", "npx", "pnpm", "yarn", "pytest", "python", "python3", "pip", "pip3", "uv", "cargo", "go",
+    "ruff", "black", "git", "node", "make", "bash", "sh", "cd", "ls", "cat", "echo",
+}
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+_THINK_TAG = re.compile(r"(?ims)^[ \t]*<(think(?:ing)?)>.*?</\1>[ \t]*\n?")
+
+
+# --------------------------------------------------------------------------- #
+# Clipboard
+# --------------------------------------------------------------------------- #
 
 def get_clipboard() -> str:
     env = None
@@ -121,9 +180,179 @@ def set_clipboard(text: str) -> None:
     raise RuntimeError(f"Could not copy to clipboard (tried: {tried}).")
 
 
+# --------------------------------------------------------------------------- #
+# Normalisation: undo damage done by chats / renderers / copy-paste
+# --------------------------------------------------------------------------- #
+
+def _first_token(text: str) -> str:
+    m = re.match(r"\s*([A-Za-z_]+)", text)
+    return m.group(1) if m else ""
+
+
+def _known_line_tokens() -> set[str]:
+    return set(COMMANDS) | set(COMMAND_ALIASES) | {"SEARCH", "REPLACE", "MARKER", "CONTENT"}
+
+
+def _fix_line(line: str) -> str:
+    """Restore escaped delimiters and typographic characters on delimiter / command lines only."""
+    s = line.rstrip()
+
+    # A delimiter that is the whole line: `&lt;&lt;&lt;`, `\<\<\<`, `&gt;&gt;&gt;`, `\>\>\>`
+    m = re.fullmatch(r"\s*((?:&lt;|\\<){3,})", s)
+    if m:
+        return "<" * len(re.findall(r"&lt;|\\<", m.group(1)))
+    m = re.fullmatch(r"\s*((?:&gt;|\\>){2,})", s)
+    if m:
+        return ">" * len(re.findall(r"&gt;|\\>", m.group(1)))
+
+    # Command / keyword lines: escaped trailing opener, smart quotes, unicode arrows.
+    if _first_token(s).upper() in _known_line_tokens():
+        m = re.search(r"(?:&lt;|\\<){1,5}\s*$", s)
+        if m:
+            s = s[: m.start()] + "<" * len(re.findall(r"&lt;|\\<", m.group(0)))
+        s = s.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        s = re.sub(r"\s[–—−]+>", " ->", s)
+        return s if s != line.rstrip() else line
+    return line
+
+
+def _dedent_plan(text: str) -> str:
+    """If the whole plan is uniformly indented (e.g. pasted from a list), remove the indent."""
+    nonblank = [ln for ln in text.split("\n") if ln.strip()]
+    if not nonblank:
+        return text
+    indent = min(len(ln) - len(ln.lstrip()) for ln in nonblank)
+    if indent > 0 and _is_strict_command(nonblank[0]):
+        return textwrap.dedent(text)
+    return text
+
+
+def _normalize(text: str) -> str:
+    text = (
+        text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ").translate(_ZERO_WIDTH)
+    )
+    text, removed = _THINK_TAG.subn("", text)
+    if removed:
+        _warn(f"ignored {removed} <thinking> block(s)")
+
+    fixed = 0
+    lines = []
+    for line in text.split("\n"):
+        new = _fix_line(line)
+        if new != line:
+            fixed += 1
+        lines.append(new)
+    if fixed:
+        _warn(f"restored {fixed} escaped or typographic delimiter/command line(s)")
+    return _dedent_plan("\n".join(lines))
+
+
+def _norm_path(raw: str) -> str:
+    """`**./src\\a.js**` -> `src/a.js`; absolute paths inside the project become relative."""
+    p = raw.strip().strip("*`'\"").strip()
+    if "\\" in p and "/" not in p:
+        p = p.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    if p.startswith("/"):
+        try:
+            rel = Path(p).resolve().relative_to(Path.cwd().resolve())
+        except (ValueError, OSError):
+            return p  # leave it: the executor rejects it as INVALID_PATH
+        _warn(f"absolute path made project-relative: {rel.as_posix()}")
+        return rel.as_posix()
+    return p
+
+
+def _path(raw: str) -> str:
+    return clean_path(_norm_path(raw))
+
+
+# --------------------------------------------------------------------------- #
+# Line classification
+# --------------------------------------------------------------------------- #
+
+def _is_strict_command(line: str) -> bool:
+    """`EDIT path`, `RUN pytest` ... : exact upper-case command followed by an argument."""
+    m = re.match(r"^([A-Z_]+):?\s+\S", line.strip())
+    return bool(m) and (m.group(1) in COMMANDS or m.group(1) in COMMAND_ALIASES)
+
+
+def _is_prose(line: str) -> bool:
+    """
+    True for commentary that can safely be skipped at the edges of a plan.
+    Anything that could be a (mistyped) command, shell command or structural marker is
+    NOT prose, so real mistakes still produce an error instead of vanishing silently.
+    """
+    s = line.strip()
+    if s.startswith(("<", "=", ">")):
+        return False
+    tok = _first_token(s)
+    if not tok:
+        return True
+    up = tok.upper()
+    if up in _BLOCK_KEYWORDS or tok.lower() in _SHELL_WORDS:
+        return False
+    if up in COMMANDS or up in COMMAND_ALIASES:
+        # "Create a new file called foo" is a sentence; "Create src/a.py <<<" is a command.
+        sentence = (
+            tok.istitle()
+            and len(s.split()) >= 4
+            and "/" not in s
+            and "\\" not in s
+            and "->" not in s
+            and not s.endswith("<")
+        )
+        return sentence
+    if difflib.get_close_matches(up, sorted(COMMANDS), n=1, cutoff=0.8):
+        return False  # probably a typo of a command
+    return True
+
+
+def _has_later_command(lines: list[str], start: int) -> bool:
+    return any(_is_strict_command(ln) for ln in lines[start:])
+
+
+# --------------------------------------------------------------------------- #
+# Plan extraction
+# --------------------------------------------------------------------------- #
+
 def _is_code_exec_fence(info: str) -> bool:
     """Accept `code_exec`, `code-exec`, `code exec`, `CODE_EXEC`, `code_exec plan`, `code_exec:` ..."""
     return re.sub(r"[^a-z]", "", info.lower()).startswith("codeexec")
+
+
+def _parses_cleanly(text: str) -> bool:
+    try:
+        return bool(_parse_text(text, lambda _msg: None))
+    except (OpError, ValueError):
+        return False
+
+
+def _find_plan_start(lines: list[str]) -> int | None:
+    """Index of the first line of an unfenced plan (skipping leading prose), or None."""
+    first: int | None = None
+    for idx, raw in enumerate(lines):
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if first is None:
+            first = idx
+        if s.split()[0] == "THINK":
+            rest = [ln.strip() for ln in lines[idx:]]
+            if idx == first and "END_THINK" in rest and any(_is_strict_command(ln) for ln in rest):
+                return idx
+            continue
+        if _is_strict_command(s):
+            # A plan must start the reply; after leading prose it must also parse cleanly,
+            # so a sentence like "RUN the tests now" can never be mistaken for a plan.
+            # RUN/COMMIT take free text, so they are only trusted as the very first line.
+            free_text = s.split()[0].rstrip(":") in {"RUN", "COMMIT", "EXEC", "EXECUTE", "RUN_COMMAND"}
+            if (idx == first and not (free_text and len(lines) > idx + 1 and _is_prose(lines[idx]))) or (
+                idx != first and not free_text and _parses_cleanly("\n".join(lines[idx:]))
+            ):
+                return idx
+    return None
 
 
 def extract_plan(text: str) -> str:
@@ -131,11 +360,19 @@ def extract_plan(text: str) -> str:
     Extract the executable code_exec plan block from an AI response.
     Ignores conversational explanations, Markdown prose, and unrelated code blocks.
     """
-    sanitized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\u00a0", " ")
+    sanitized = _normalize(text)
     lines = sanitized.split("\n")
 
     plans: list[str] = []
     unclosed: list[str] = []
+
+    def keep_unclosed(block: str, what: str) -> None:
+        # Forgot the closing fence, but every operation is complete: accept it.
+        if _parses_cleanly(block):
+            _warn(f"closing marker missing for {what}; plan is complete, applying it")
+            plans.append(block)
+        else:
+            unclosed.append(f"unclosed {what}")
 
     i = 0
     while i < len(lines):
@@ -154,10 +391,11 @@ def extract_plan(text: str) -> str:
                     break
                 block_lines.append(lines[i])
                 i += 1
+            block = "\n".join(block_lines)
             if found_end:
-                plans.append("\n".join(block_lines))
+                plans.append(block)
             else:
-                unclosed.append("unclosed CODE_EXEC_PLAN block")
+                keep_unclosed(block, "CODE_EXEC_PLAN block")
             continue
 
         # Format 1: Code fences (``` or ~~~)
@@ -198,10 +436,11 @@ def extract_plan(text: str) -> str:
                 i += 1
 
             if is_code_exec:
+                block = "\n".join(block_lines)
                 if found_end:
-                    plans.append("\n".join(block_lines))
+                    plans.append(block)
                 else:
-                    unclosed.append("unclosed code_exec block")
+                    keep_unclosed(block, "code_exec block")
             continue
 
         i += 1
@@ -215,9 +454,12 @@ def extract_plan(text: str) -> str:
         return plans[0]
 
     if len(plans) > 1:
+        if MERGE_MULTIPLE_PLANS:
+            _warn(f"{len(plans)} plan blocks found; merged in order (prefer a single block)")
+            return "\n".join(plans)
         raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans)}")
 
-    # Format 3: bare plan (no fence) - starts directly with a command, or a legacy THINK block
+    # Format 3: unfenced plan (optionally wrapped in a plain fence, optionally after some prose)
     trimmed = sanitized.strip()
     candidate = trimmed
 
@@ -225,24 +467,28 @@ def extract_plan(text: str) -> str:
     if m_wrap:
         candidate = m_wrap.group(2).strip()
 
-    cand_lines = [ln for ln in candidate.split("\n") if ln.strip()]
-    cand_idx = 0
-    while cand_idx < len(cand_lines) and cand_lines[cand_idx].strip().startswith("#"):
-        cand_idx += 1
-    if cand_idx < len(cand_lines):
-        first_word = cand_lines[cand_idx].strip().split()[0].rstrip(":")
-        if first_word == "THINK":
-            has_end_think = any(ln.strip() == "END_THINK" for ln in cand_lines)
-            has_command = any(
-                re.match(r"^([A-Z_]+)(?:\s+.*)?$", ln.strip()) and ln.strip().split()[0] in COMMANDS
-                for ln in cand_lines
-            )
-            if has_end_think and has_command:
-                return candidate
-        elif first_word in COMMANDS or first_word in COMMAND_ALIASES:
-            return candidate
-    raise OpError("ERR|PLAN_NOT_FOUND")
+    cand_lines = candidate.split("\n")
+    start = _find_plan_start(cand_lines)
+    if start is not None:
+        if start > 0:
+            _warn(f"ignored {start} line(s) of text before the plan")
+        return "\n".join(cand_lines[start:])
+    if NO_PLAN_IS_ERROR:
+        raise OpError("ERR|PLAN_NOT_FOUND")
+    return ""
 
+
+def has_plan(text: str) -> bool:
+    """True if the reply contains a plan (used to skip the run silently when it does not)."""
+    try:
+        return bool(extract_plan(text).strip())
+    except OpError:
+        return True  # a plan was attempted but is broken: let the caller report the error
+
+
+# --------------------------------------------------------------------------- #
+# Block reading
+# --------------------------------------------------------------------------- #
 
 def _find_close(lines: list[str], start: int, closer: re.Pattern[str]) -> int:
     """Index of the line that closes a block whose content begins at `start`, or -1."""
@@ -327,6 +573,37 @@ def _try_diff_pair(lines: list[str], i: int, command: str) -> tuple[str, str, in
     return "\n".join(lines[start:sep]), "\n".join(lines[sep + 1:end]), end + 1
 
 
+def _read_pair(lines: list[str], i: int, command: str) -> tuple[str, str, int]:
+    """One (search, replace) or (marker, content) pair, in either block style."""
+    pair = _try_diff_pair(lines, i, command)
+    if pair:
+        return pair
+    first_kw, second_kw = ("MARKER", "CONTENT") if command.startswith("INSERT") else ("SEARCH", "REPLACE")
+    i, first_inline = expect_keyword(lines, i, first_kw, command)
+    first, i = read_block(lines, i, inline_started=first_inline)
+    i, second_inline = expect_keyword(lines, i, second_kw, command)
+    second, i = read_block(lines, i, inline_started=second_inline)
+    return first, second, i
+
+
+def _peek_pair(lines: list[str], i: int, command: str) -> tuple[str, str, int] | None:
+    """If another pair follows the one just read, read it (same command and path)."""
+    j = i
+    while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
+        j += 1
+    if j >= len(lines):
+        return None
+    s = lines[j].strip()
+    keyword = "MARKER" if command.startswith("INSERT") else "SEARCH"
+    if not (_DIFF_OPEN.match(s) or re.match(rf"^{keyword}\s*:?\s*(<{{1,5}})?\s*$", s, re.IGNORECASE)):
+        return None
+    return _read_pair(lines, j, command)
+
+
+# --------------------------------------------------------------------------- #
+# Instruction parsing
+# --------------------------------------------------------------------------- #
+
 def _unwrap(text: str) -> str:
     """Drop a leading `$ ` prompt and wrapping quotes/backticks around a one-line argument."""
     text = text.strip()
@@ -360,11 +637,13 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         cmd_upper = raw_cmd.upper()
         if cmd_upper in COMMAND_ALIASES:
             hint = f" Did you mean '{COMMAND_ALIASES[cmd_upper]}'?"
-        elif raw_cmd.lower() in {"npm", "pnpm", "yarn", "pytest", "python", "python3", "cargo", "go", "ruff", "black", "git"}:
+        elif raw_cmd.lower() in _SHELL_WORDS:
             hint = f" Shell commands must be prefixed with RUN. Did you mean 'RUN {line}'?"
         else:
             matches = difflib.get_close_matches(cmd_upper, sorted(COMMANDS), n=1, cutoff=0.6)
             hint = f" Did you mean '{matches[0]}'?" if matches else ""
+            if not matches:
+                hint = " If this is commentary, put it outside the code_exec block."
         raise OpError(f"ERR|UNKNOWN_COMMAND|{raw_cmd} - Unsupported command.{hint}")
 
     i += 1
@@ -379,16 +658,16 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         pair = _ARROW.match(rest)
         if not pair:
             raise ValueError(f"{command} requires 'source -> destination'")
-        return Operation(command, (clean_path(pair[1]), clean_path(pair[2]))), i
+        return Operation(command, (_path(pair[1]), _path(pair[2]))), i
 
     if command == "CHMOD":
         parts = rest.rsplit(None, 1)
         if len(parts) != 2:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
-        return Operation("CHMOD", (clean_path(parts[0]), parts[1].strip())), i
+        return Operation("CHMOD", (_path(parts[0]), parts[1].strip())), i
 
     if command in {"DELETE", "MKDIR", "TOUCH"}:
-        return Operation(command, (clean_path(rest.rstrip(":")),)), i
+        return Operation(command, (_path(rest.rstrip(":")),)), i
 
     # Commands that carry a content block. The opener may trail the path: `CREATE a.py <<<`.
     inline_block = False
@@ -397,39 +676,21 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         rest = opener.group(1)
         inline_block = True
 
-    path = clean_path(rest.rstrip(":").strip())
+    path = _path(rest.rstrip(":").strip())
 
     if command in {"CREATE", "APPEND", "PREPEND", "PATCH"}:
         content, i = read_block(lines, i, inline_started=inline_block)
         return Operation(command, (path,), content), i
 
-    if command in {"EDIT", "REPLACE_ALL"}:
-        pair = _try_diff_pair(lines, i, command)
-        if pair:
-            search, replace, i = pair
-            return Operation(command, (path,), search, replace), i
-        i, search_inline = expect_keyword(lines, i, "SEARCH", command)
-        search, i = read_block(lines, i, inline_started=search_inline)
-        i, replace_inline = expect_keyword(lines, i, "REPLACE", command)
-        replace, i = read_block(lines, i, inline_started=replace_inline)
-        return Operation(command, (path,), search, replace), i
-
-    # INSERT_BEFORE / INSERT_AFTER
-    pair = _try_diff_pair(lines, i, command)
-    if pair:
-        marker, content, i = pair
-        return Operation(command, (path,), marker, content), i
-    i, marker_inline = expect_keyword(lines, i, "MARKER", command)
-    marker, i = read_block(lines, i, inline_started=marker_inline)
-    i, content_inline = expect_keyword(lines, i, "CONTENT", command)
-    content, i = read_block(lines, i, inline_started=content_inline)
-    return Operation(command, (path,), marker, content), i
+    # EDIT / REPLACE_ALL (search, replace) and INSERT_BEFORE / INSERT_AFTER (marker, content)
+    first, second, i = _read_pair(lines, i, command)
+    return Operation(command, (path,), first, second), i
 
 
-def parse_operations(text: str) -> list[Operation]:
-    sanitized_text = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\u00a0", " ")
-    lines = sanitized_text.split("\n")
-    operations = []
+def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
+    lines = text.split("\n")
+    operations: list[Operation] = []
+    leading_skipped = 0
     i = 0
 
     while i < len(lines):
@@ -449,12 +710,49 @@ def parse_operations(text: str) -> list[Operation]:
             continue
 
         lineno = i + 1
+
+        # Commentary before the first command is skipped (and reported).
+        if not operations and _is_prose(line):
+            leading_skipped += 1
+            i += 1
+            continue
+
         try:
             operation, i = _parse_instruction(lines, i)
         except OpError as exc:
+            # Commentary after the last command is skipped; mid-plan surprises still fail.
+            if operations and _is_prose(line) and not _has_later_command(lines, i + 1):
+                warn(f"ignored trailing text after the plan (from line {lineno})")
+                break
             raise OpError(f"line {lineno}: {exc}") from None
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
         operations.append(operation)
 
+        # Several SEARCH/REPLACE (or MARKER/CONTENT) pairs under one command become
+        # separate operations on the same path.
+        if operation.command in _PAIR_COMMANDS:
+            extra = 0
+            while True:
+                try:
+                    nxt = _peek_pair(lines, i, operation.command)
+                except ValueError as exc:
+                    raise ValueError(f"line {lineno}: {exc}") from None
+                if nxt is None:
+                    break
+                first, second, i = nxt
+                operations.append(Operation(operation.command, operation.args, first, second))
+                extra += 1
+            if extra:
+                warn(
+                    f"line {lineno}: {extra + 1} blocks under one {operation.command} "
+                    f"applied as {extra + 1} separate operations"
+                )
+
+    if leading_skipped:
+        warn(f"ignored {leading_skipped} line(s) of text before the plan")
     return operations
+
+
+def parse_operations(text: str) -> list[Operation]:
+    return _parse_text(_normalize(text), _warn)
