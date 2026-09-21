@@ -21,9 +21,11 @@ A deterministic, atomic local code executor and guardrailed runtime designed for
 - **Persistent Rollback (`undo`)**: Retains project-local transaction journals and file snapshots under `.code_exec/backups/`, enabling full rollback via `code-exec undo`.
 - **Pre-Execution Diff Preview**: Inspect formatted unified diffs before confirming with `--diff` or by pressing `v` at the confirmation prompt.
 - **Sensitive Credential Protection**: Blocks accidental modification or deletion of secrets, environment files, and CI workflows (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.github/workflows/*`).
-- **Atomic Consistency Checks**: Catches conflicting or duplicate file modifications in a plan before touching disk (e.g., duplicate `CREATE` commands or `EDIT` after `DELETE`).
-- **Interactive TUI & Diagnostic Cards**: Claude Code-inspired typography, responsive boxed menus, colorized diff visualizer, and machine-readable error cards (`ERR|...`).
-- **Tolerant Search & Replace**: Multi-tier matching handles indentation variations, collapsed whitespace, CRLF vs LF, and JSX tag formatting without newline drift.
+- **Atomic Consistency Checks & Identity Protection**: Catches conflicting or duplicate file modifications, self-nesting moves, and same-path operations before touching disk.
+- **Interactive TUI & Visual Indicators**: Claude Code-inspired typography, responsive boxed menus, folder tree visualizer, colorized diff previewer, and live animated searching indicators during pattern matching.
+- **Multi-Tier Intelligent Matcher**: 8-tier engine supporting whitespace/indentation tolerance, JSX normalization, token-aware structural matching for Python and JS/TS, fuzzy similarity matching, and 8-line boundary anchor fallback for oversized blocks.
+- **Pattern-Based File Management**: Glob and regex pattern matching support for `MOVE` and `COPY` operations (e.g., `MOVE test* -> tests` or `MOVE regex:^temp_.* -> /tmp`).
+- **Ambiguous Match Diagnostics**: Reports exact line numbers and candidate ranges when a search block matches multiple times, allowing immediate anchor refinement.
 - **Scoped Git Commits**: Automatically stages and commits *only* the specific files modified by the plan, leaving other untracked or modified files in your repo untouched.
 
 ---
@@ -151,6 +153,12 @@ code-exec -c
 # Validate plan without touching files
 code-exec --dry-run
 
+# Syntax and delimiter validation only (no filesystem checks)
+code-exec --check
+
+# Visual directory tree preview of proposed changes
+code-exec --tree
+
 # Apply immediately without confirmation prompt
 code-exec --yes
 
@@ -180,8 +188,8 @@ The AI can analyze and explain its reasoning in plain text outside the code bloc
 | `EDIT` | `EDIT path SEARCH <<<...>>> REPLACE <<<...>>>` | Surgically replaces a unique code anchor. |
 | `PATCH` | `PATCH path <<< unified diff >>>` | Applies unified diff with line-drift tolerance. |
 | `DELETE` | `DELETE path` | Removes a file or directory safely. |
-| `MOVE` | `MOVE src -> dst` | Moves a file or directory. |
-| `COPY` | `COPY src -> dst` | Copies a file or folder. |
+| `MOVE` | `MOVE src -> dst` | Moves a file or directory. Supports glob (`test*`) and regex (`regex:...`). |
+| `COPY` | `COPY src -> dst` | Copies a file or folder. Supports glob (`test*`) and regex (`regex:...`). |
 | `RENAME` | `RENAME src -> dst` | Renames a file or folder. |
 | `MKDIR` | `MKDIR path` | Creates a directory path recursively. |
 | `APPEND` | `APPEND path <<< content >>>` | Appends content to the end of a file. |
@@ -192,6 +200,23 @@ The AI can analyze and explain its reasoning in plain text outside the code bloc
 | `COMMIT` | `COMMIT message` | Scoped commit staging only modified files. |
 
 > **Note on Block Delimiters**: `<<<` can be placed either on its own line or inline immediately after the instruction/keyword (e.g. `CREATE path <<<`).
+
+---
+
+## Intelligent Matching Engine
+
+The search and replace engine (`code_exec_matcher.py`) executes through an 8-tier fallback pipeline to handle formatting drift without false positives:
+
+1. **Exact Substring Match**: Verifies byte-for-byte fidelity.
+2. **Trailing Whitespace / CRLF Tolerance**: Normalizes line-end discrepancies and trailing space.
+3. **Indentation Tolerance**: Strips common leading indentation when code blocks are shifted inside functions or classes.
+4. **Harmless Whitespace Collapsing**: Collapses internal runs of spaces and tabs.
+5. **JSX / HTML Normalization**: Matches attributes with mixed quotes (`'` vs `"`), whitespace variations, and self-closing tags (`/>`).
+6. **Token-Aware Structural Matching**:
+   - **Python**: Normalizes string quotes, ignores comments, and drops optional trailing commas in lists/tuples.
+   - **JS / TS**: Normalizes quotes, removes comments, and handles optional trailing commas before brackets.
+7. **High-Similarity Fuzzy Matching**: Employs structural sequence matching ($\ge 90\%$ threshold) to overcome minor punctuation drift.
+8. **Boundary Anchor Fallback (Token Saver)**: Resolves oversized search blocks ($>60$ lines) by anchoring on the first 4 and last 4 lines of the block, bypassing intermediate body drift.
 
 ---
 
