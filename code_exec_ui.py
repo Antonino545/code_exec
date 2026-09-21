@@ -445,6 +445,8 @@ class TerminalUI:
         row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
+        row("--export-plan", "Export clean .plan-only project folder", c.CYAN)
+        row("--ignore-file <name>", "Specify custom ignore file (default: .ignorefile)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
         row("--commit-prompt, -c", "Copy a git diff prompt for AI commits", c.CYAN)

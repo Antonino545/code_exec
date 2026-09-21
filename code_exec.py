@@ -739,6 +739,10 @@ def main(argv=None) -> int:
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--export-plan", "--plan-only", dest="export_plan", action="store_true",
                         help="Export a minimal clean project folder (.plan-only) containing only relevant files")
+    parser.add_argument("--ignore-file", default=".ignorefile",
+                        help="Path or name of custom ignore configuration file (default: .ignorefile)")
+    parser.add_argument("--target-dir", default=".plan-only",
+                        help="Target output directory for clean plan export (default: .plan-only)")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
     parser.add_argument("--tree", action="store_true",
@@ -871,7 +875,11 @@ def main(argv=None) -> int:
                 plan_content = read_input(args)
             except Exception:
                 pass
-            res = create_plan_folder(plan_text=plan_content)
+            res = create_plan_folder(
+                plan_text=plan_content,
+                output_dirname=args.target_dir,
+                ignore_filename=args.ignore_file,
+            )
             ui.plan_export_success(
                 location=str(res["location"]),
                 included=int(res["included"]),
