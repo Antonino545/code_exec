@@ -832,6 +832,7 @@ def main(argv=None) -> int:
         args.yes,
         args.no_run,
         args.no_commit,
+        args.export_plan,
     ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
