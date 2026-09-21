@@ -871,10 +871,12 @@ def main(argv=None) -> int:
     if args.export_plan:
         from code_exec_plan_export import create_plan_folder
         try:
+            target_out = args.target_dir or "context"
             res = create_plan_folder(
                 export_all=True,
-                output_dirname=args.target_dir,
+                output_dirname=target_out,
                 ignore_filename=args.ignore_file,
+                root=Path.cwd().resolve(),
             )
             ui.plan_export_success(
                 location=str(res["location"]),

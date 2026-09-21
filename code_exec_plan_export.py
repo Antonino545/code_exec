@@ -92,7 +92,7 @@ DEFAULT_IGNORE_PATTERNS = [
 ]
 
 
-def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = ".code-exec-ignore") -> tuple[list[str], str]:
+def load_ignore_patterns(root: Path | None = None, ignore_filename: str | None = ".code-exec-ignore") -> tuple[list[str], str]:
     """
     Loads exclusion patterns, always preserving DEFAULT_IGNORE_PATTERNS (caches, temp, artifacts).
     Checks candidate ignore files in priority order:
@@ -102,6 +102,8 @@ def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = ".code
       4. .ignorefile
       5. .gitignore
     """
+    if root is None:
+        root = Path.cwd().resolve()
     patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
     candidates: list[str] = []
     if ignore_filename and ignore_filename != ".code-exec-ignore":
@@ -218,7 +220,7 @@ def create_plan_folder(
     plan_text: str | None = None,
     output_dirname: str = "context",
     ignore_filename: str | None = ".code-exec-ignore",
-    root: Path = ROOT,
+    root: Path | None = None,
     export_all: bool = True,
 ) -> dict[str, int | str]:
     """
@@ -226,6 +228,8 @@ def create_plan_folder(
     excluding temporary files, caches, and build artifacts.
     Computes total file count and estimated LLM tokens.
     """
+    if root is None:
+        root = Path.cwd().resolve()
     target_dir = root / output_dirname
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
