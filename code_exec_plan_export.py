@@ -141,20 +141,34 @@ def extract_files_from_plan(plan_text: str) -> list[str]:
     return list(dict.fromkeys(targets))
 
 
+def estimate_tokens(text: str) -> int:
+    """Estimates LLM token count using a blend of whitespace splits and character length."""
+    if not text:
+        return 0
+    words = len(text.split())
+    chars = len(text)
+    # Heuristic: ~4 chars per token for code/prose, blended with word count
+    return max(words, int(chars / 3.8))
+
+
 def create_plan_folder(
     plan_text: str | None = None,
     output_dirname: str = ".context",
     ignore_filename: str = ".ignorefile",
     root: Path = ROOT,
+    export_all: bool = True,
 ) -> dict[str, int | str]:
     """
-    Creates or cleanly refreshes a plan-only folder with minimal relevant files.
+    Creates or cleanly refreshes a clean project context folder,
+    excluding temporary files, caches, and build artifacts.
+    Computes total file count and estimated LLM tokens.
     """
     target_dir = root / output_dirname
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
-    requested_paths = extract_files_from_plan(plan_text or "")
+    # Collect candidate files (default to entire clean workspace)
     candidate_files: list[Path] = []
+    requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
 
     if requested_paths:
         for p_str in requested_paths:
@@ -177,6 +191,8 @@ def create_plan_folder(
 
     included_files: list[Path] = []
     ignored_count = 0
+    total_bytes = 0
+    total_tokens = 0
 
     for file_path in candidate_files:
         try:
@@ -189,6 +205,12 @@ def create_plan_folder(
             continue
 
         included_files.append(file_path)
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            total_tokens += estimate_tokens(content)
+            total_bytes += file_path.stat().st_size
+        except OSError:
+            pass
 
     if target_dir.exists():
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -204,5 +226,7 @@ def create_plan_folder(
         "location": f"{output_dirname}/",
         "included": len(included_files),
         "ignored": ignored_count,
+        "tokens": total_tokens,
+        "size_kb": round(total_bytes / 1024, 1),
         "ignore_file": used_ignore,
     }

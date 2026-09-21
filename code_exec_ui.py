@@ -433,7 +433,7 @@ class TerminalUI:
         lines.append(self._divider("Commands"))
         row("code-exec", "Open the interactive launcher menu", c.WHITE)
         row("code-exec apply", "Apply the plan from your clipboard", c.WHITE)
-        row("code-exec export-plan", "Export clean .context project folder", c.WHITE)
+        row("code-exec export-context", "Export clean .context folder (files + tokens)", c.WHITE)
         row("code-exec undo", "Revert the last applied plan", c.WHITE)
         row("code-exec update", "Install the latest version from GitHub", c.WHITE)
         row("code-exec theme <name>", f"Set theme: {', '.join(c.themes)}", c.WHITE)
@@ -445,7 +445,7 @@ class TerminalUI:
         row("--check", "Parse and validate syntax only (no file lookups)", c.CYAN)
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
-        row("--export-plan", "Export clean .context project folder", c.CYAN)
+        row("--export-context", "Export clean .context folder (alias: export-concet)", c.CYAN)
         row("--ignore-file <name>", "Specify custom ignore file (default: .ignorefile)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
@@ -503,7 +503,7 @@ class TerminalUI:
             ("5", "Check updates", "install latest from GitHub", "update"),
             ("6", "Undo last plan", "revert file changes", "undo"),
             ("7", "Commit prompt", "git diff prompt to clipboard", "-c"),
-            ("8", "Plan folder", "export clean .context", "export-plan"),
+            ("8", "Export context", "clean project folder (.context)", "export-context"),
         ]
         lines = [""]
         for key, label, desc, flag in items:
@@ -880,15 +880,17 @@ class TerminalUI:
         c = self.palette
         self._card("Commit skipped", "warn", [self._line(error, c.AMBER)])
 
-    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str) -> None:
+    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0) -> None:
         c = self.palette
+        token_str = f"~{tokens:,} tokens ({size_kb} KB)"
         lines = [
             f"  {c.paint('Location:', c.SLATE):<18} {c.paint(location, c.CYAN, bold=True)}",
             f"  {c.paint('Files included:', c.SLATE):<18} {c.paint(str(included), c.GREEN, bold=True)}",
+            f"  {c.paint('Est. Tokens:', c.SLATE):<18} {c.paint(token_str, c.AMBER, bold=True)}",
             f"  {c.paint('Files ignored:', c.SLATE):<18} {c.paint(str(ignored), c.SLATE)}",
             f"  {c.paint('Ignore file:', c.SLATE):<18} {c.paint(ignore_file, c.WHITE)}",
         ]
-        self._card("Context folder updated", "ok", lines)
+        self._card("Clean Context Exported", "ok", lines)
 
     # ------------------------------------------------------------------ #
     # Warnings, errors & recovery
