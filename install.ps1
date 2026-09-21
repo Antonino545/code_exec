@@ -47,13 +47,18 @@ Set-Content -Path $cmdPath -Value $cmdScript -Encoding ASCII
 
 Write-Host "Created executable wrapper at $cmdPath" -ForegroundColor Green
 
-# 4. Check & add to User PATH
+# 4. Check & add to User PATH persistently
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -split ';' -notcontains $binDir) {
-    $newPath = "$userPath;$binDir"
+$pathList = $userPath -split ';' | Where-Object { $_ -ne "" }
+
+if ($pathList -notcontains $binDir) {
+    $newPath = ($pathList + $binDir) -join ';'
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
     $env:Path = "$env:Path;$binDir"
-    Write-Host "Added $binDir to User PATH." -ForegroundColor Green
+    Write-Host "✓ Added $binDir to persistent User PATH." -ForegroundColor Green
+    Write-Host "  The current session has been updated automatically." -ForegroundColor Green
+} else {
+    Write-Host "✓ $binDir is already present in User PATH." -ForegroundColor Green
 }
 
 Write-Host "`nInstallation successful! Restart PowerShell or run: code-exec --help" -ForegroundColor Cyan

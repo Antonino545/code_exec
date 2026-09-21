@@ -86,20 +86,33 @@ if [ "$(uname -s)" = "Linux" ]; then
     fi
 fi
 
-# 6. Ensure PATH inclusion
+# 6. Ensure persistent PATH inclusion
+add_to_path() {
+    local rc_file="$1"
+    local bin_path="$2"
+    if [ -f "$rc_file" ]; then
+        if ! grep -qs "$bin_path" "$rc_file"; then
+            printf "\n# code-exec path\nexport PATH=\"%s:\$PATH\"\n" "$bin_path" >> "$rc_file"
+            echo -e "${GREEN}✓${RESET} Added ${BOLD}$bin_path${RESET} to ${BOLD}$rc_file${RESET}"
+            UPDATED_RC="$rc_file"
+        fi
+    fi
+}
+
+UPDATED_RC=""
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
-        echo -e "${AMBER}! Note: $BIN_DIR is not in your current PATH.${RESET}"
-        SHELL_RC=""
-        if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
-            SHELL_RC="$HOME/.zshrc"
-        elif [ -f "$HOME/.bashrc" ]; then
-            SHELL_RC="$HOME/.bashrc"
-        fi
-        if [ -n "$SHELL_RC" ]; then
-            echo "export PATH=\"\$PATH:$BIN_DIR\"" >> "$SHELL_RC"
-            echo -e "  Added to ${BOLD}$SHELL_RC${RESET}. Run: ${BOLD}source $SHELL_RC${RESET}"
+        # Detect shell configuration files
+        add_to_path "$HOME/.zshrc" "$BIN_DIR"
+        add_to_path "$HOME/.bashrc" "$BIN_DIR"
+        add_to_path "$HOME/.bash_profile" "$BIN_DIR"
+        add_to_path "$HOME/.profile" "$BIN_DIR"
+
+        if [ -n "$UPDATED_RC" ]; then
+            echo -e "${AMBER}!${RESET} To update your current terminal session, run: ${BOLD}source $UPDATED_RC${RESET}"
+        else
+            echo -e "${AMBER}!${RESET} Please ensure ${BOLD}$BIN_DIR${RESET} is included in your PATH."
         fi
         ;;
 esac
