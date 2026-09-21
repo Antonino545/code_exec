@@ -30,10 +30,37 @@ A deterministic, atomic local code executor and guardrailed runtime designed for
 
 ---
 
-## Installation & Global Setup
+## Installation & Setup
 
-### Recommended: Install via pipx / uv (Standard Packaging)
-`code-exec` provides a standard `pyproject.toml` package configuration. You can install it globally with:
+### Automatic One-Line Installation
+
+#### macOS & Linux
+Run via `curl`:
+```bash
+curl -fsSL [https://raw.githubusercontent.com/antonino54/code_exec/main/install.sh](https://raw.githubusercontent.com/antonino54/code_exec/main/install.sh) | bash
+```
+
+Or from a local clone of this repository:
+```bash
+./install.sh
+```
+
+#### Windows (PowerShell)
+Run via `irm`:
+```powershell
+irm [https://raw.githubusercontent.com/antonino54/code_exec/main/install.ps1](https://raw.githubusercontent.com/antonino54/code_exec/main/install.ps1) | iex
+```
+
+Or from a local clone:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+---
+
+### Manual Package Installation
+
+`code-exec` also provides a standard `pyproject.toml` configuration:
 
 ```bash
 # Using pipx (isolated global CLI)
@@ -42,72 +69,8 @@ pipx install .
 # Or using uv
 uv tool install .
 
-# Or editable development install
+# Or editable local development install
 pip install -e .
-```
-
-### Alternative: Shell Launcher Scripts
-
-#### macOS
-Create a launcher in `/usr/local/bin` (replace `/path/to/code_exec` with the absolute path to your repo):
-```zsh
-sudo tee /usr/local/bin/code-exec << 'EOF'
-#!/usr/bin/env zsh
-exec python3 "/path/to/code_exec/code_exec.py" "$@"
-EOF
-sudo chmod +x /usr/local/bin/code-exec
-```
-
-#### Option 2: Shell Alias
-Add to your `~/.zshrc` or `~/.bashrc`:
-```zsh
-alias code-exec='python3 "/path/to/code_exec/code_exec.py"'
-```
-Then reload: `source ~/.zshrc`.
-
----
-
-### Ubuntu / Debian Linux
-
-1. Ensure clipboard support is installed for your display server:
-   ```bash
-   # For X11:
-   sudo apt install -y xclip
-   # Or for Wayland:
-   sudo apt install -y wl-clipboard
-   ```
-
-2. Create a global launcher script:
-   ```bash
-   sudo tee /usr/local/bin/code-exec << 'EOF'
-   #!/usr/bin/env bash
-   exec python3 "/path/to/code_exec/code_exec.py" "$@"
-   EOF
-
-   sudo chmod +x /usr/local/bin/code-exec
-   ```
-
-   *(Replace `/path/to/code_exec` with the absolute path to your cloned repository).*
-
----
-
-### Windows
-
-#### Option 1: PowerShell Profile Function (Recommended)
-1. Open your PowerShell profile (`notepad $PROFILE`).
-2. Add the following function:
-   ```powershell
-   function code-exec {
-       python "C:\path\to\code_exec\code_exec.py" @args
-   }
-   ```
-3. Save the file and restart PowerShell or run `. $PROFILE`.
-
-#### Option 2: CMD / Batch Wrapper
-Create a file named `code-exec.bat` inside a folder that is in your system `PATH` (such as `C:\Windows` or a dedicated `C:\bin` directory):
-```cmd
-@echo off
-python "C:\path\to\code_exec\code_exec.py" %*
 ```
 
 ---
