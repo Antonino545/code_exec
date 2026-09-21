@@ -220,14 +220,79 @@ def execute(op: Operation, fs) -> str | None:
         return f"Deleted {args[0]}"
 
     if command in {"MOVE", "COPY", "RENAME"}:
+        pattern = args[0]
+        has_wildcard = any(ch in pattern for ch in ("*", "?", "[")) or pattern.startswith("regex:")
+
+        # Handle wildcard / regex pattern move
+        if command in {"MOVE", "COPY"} and has_wildcard:
+            dst_dir = safe_path(args[1], follow_leaf=False)
+            if fs.lexists(dst_dir) and not fs.is_dir(dst_dir):
+                raise OpError(f"Target '{args[1]}' exists but is not a directory for pattern {command.lower()}")
+
+            # Resolve matching files
+            matched_paths: list[Path] = []
+            if pattern.startswith("regex:"):
+                rx = re.compile(pattern[6:])
+                parent_dir = ROOT
+                for p in parent_dir.rglob("*"):
+                    rel_p = rel(p)
+                    if rx.search(rel_p) and not any(part in PROTECTED_NAMES for part in p.parts):
+                        matched_paths.append(p)
+            else:
+                for p in ROOT.glob(pattern):
+                    if not any(part in PROTECTED_NAMES for part in p.parts):
+                        matched_paths.append(p)
+
+            if not matched_paths:
+                raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]} - No files matched pattern '{pattern}'")
+
+            # Ensure destination directory exists
+            if not fs.lexists(dst_dir):
+                fs.mkdir(dst_dir)
+
+            moved_count = 0
+            for item in sorted(matched_paths):
+                item_safe = safe_path(rel(item), follow_leaf=False)
+                item_dest = dst_dir / item.name
+                if item_safe.resolve() == item_dest.resolve():
+                    continue
+                if item_safe.resolve() in item_dest.resolve().parents:
+                    continue
+                if fs.lexists(item_dest):
+                    continue
+                if command == "COPY":
+                    fs.copy(item_safe, item_dest)
+                else:
+                    fs.move(item_safe, item_dest)
+                moved_count += 1
+
+            verb = "Copied" if command == "COPY" else "Moved"
+            return f"{verb} {moved_count} file(s) matching '{pattern}' -> {args[1]}"
+
         src = safe_path(args[0], follow_leaf=(command == "COPY"))
         dst = safe_path(args[1], follow_leaf=False)
         if not fs.lexists(src):
             raise OpError(f"Source does not exist: {args[0]}")
+
+        # Check identity: prevent operating onto itself before checking dst existence
+        src_res = src.resolve()
+        dst_res = dst.resolve() if dst.exists() else dst.parent.resolve() / dst.name
+        if src_res == dst_res:
+            raise OpError(f"Cannot {command.lower()} {args[0]} onto itself")
+        if src.exists() and dst.exists():
+            try:
+                if os.path.samefile(src, dst):
+                    raise OpError(f"Cannot {command.lower()} {args[0]} onto itself")
+            except OSError:
+                pass
+
+        # Check nesting: prevent copying/moving a directory into its own child tree
+        if src_res in dst_res.parents or (fs.is_dir(src) and (src in dst.parents or src_res in dst_res.parents)):
+            raise OpError(f"Cannot {command.lower()} {args[0]} into itself")
+
         if fs.lexists(dst):
             raise OpError(f"Destination already exists: {args[1]}")
-        if src in dst.parents:
-            raise OpError(f"Cannot {command.lower()} {args[0]} into itself")
+
         if command == "COPY":
             fs.copy(src, dst)
             return f"Copied {args[0]} -> {args[1]}"
@@ -252,10 +317,30 @@ def execute(op: Operation, fs) -> str | None:
     raise OpError(f"Unsupported command: {command}")
 
 
+def should_show_folder_tree(operations: list[Operation]) -> bool:
+    for op in operations:
+        cmd = op.command
+        if cmd in {"MKDIR", "MOVE", "RENAME", "COPY"}:
+            return True
+        if cmd == "DELETE" and op.args:
+            path_str = str(op.args[0])
+            if "/" in path_str or (ROOT / path_str).is_dir():
+                return True
+        if cmd in {"CREATE", "TOUCH"} and op.args:
+            if "/" in str(op.args[0]):
+                return True
+    return False
+
+
 def check_paths(op: Operation) -> None:
     if op.command in {"RUN", "COMMIT"}:
         return
-    for value in op.args:
+    for idx, value in enumerate(op.args):
+        # Skip path normalization on source wildcard patterns
+        if idx == 0 and op.command in {"MOVE", "COPY"} and any(ch in value for ch in ("*", "?", "[")):
+            continue
+        if idx == 0 and op.command in {"MOVE", "COPY"} and value.startswith("regex:"):
+            continue
         safe_path(value, follow_leaf=False)
 
 
@@ -654,6 +739,8 @@ def main(argv=None) -> int:
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
+    parser.add_argument("--tree", action="store_true",
+                        help="Display the proposed directory tree structure")
     parser.add_argument("--check", action="store_true",
                         help="Debug mode: parse and validate syntax only without reading or checking files")
     parser.add_argument("--clipboard", action="store_true",
@@ -728,6 +815,7 @@ def main(argv=None) -> int:
         args.prompt,
         args.commit_prompt,
         args.diff,
+        args.tree,
         args.check,
         args.clipboard,
         args.file,
@@ -822,6 +910,8 @@ def main(argv=None) -> int:
         ui.header(ROOT)
         for idx, op in enumerate(operations, 1):
             print(f"  {ui.palette.paint(str(idx), ui.palette.SLATE)}: {ui.describe_op(op)}")
+        if args.tree or should_show_folder_tree(operations):
+            ui.show_tree(operations)
         ui.parse_check_success(len(operations))
         return 0
 
@@ -836,6 +926,9 @@ def main(argv=None) -> int:
     ui.header(ROOT)
     ui.show_plan(operations, reason, deferred)
 
+    if args.tree or should_show_folder_tree(operations):
+        ui.show_tree(operations)
+
     diff_text = generate_plan_diff(operations)
     if args.diff:
         ui.show_diff(diff_text)
@@ -844,7 +937,7 @@ def main(argv=None) -> int:
         return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True)
 
     if not args.yes:
-        if not ui.confirm(diff_text=diff_text):
+        if not ui.confirm(diff_text=diff_text, on_view_tree=(lambda: ui.show_tree(operations)) if operations else None):
             ui.cancelled()
             return 0
 

@@ -330,6 +330,94 @@ class TestResilienceAndSecurity(unittest.TestCase):
         self.assertEqual(restored_mode & 0o777, 0o644)
         fs.cleanup()
 
+    def test_move_and_copy_self_nesting_and_identity_guards(self):
+        fs = RealFS(timeout=10)
+        folder = self.scratch / "base_dir"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "file.txt").write_text("content\n", encoding="utf-8")
+
+        # 1. Moving/copying a folder onto itself
+        with self.assertRaises(OpError) as ctx1:
+            execute(Operation("MOVE", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir")), fs)
+        self.assertIn("onto itself", str(ctx1.exception))
+
+        with self.assertRaises(OpError) as ctx2:
+            execute(Operation("COPY", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir")), fs)
+        self.assertIn("onto itself", str(ctx2.exception))
+
+        # 2. Moving/copying a folder into its own subfolder
+        with self.assertRaises(OpError) as ctx3:
+            execute(Operation("MOVE", (f"{self.scratch_rel}/base_dir", f"{self.scratch_rel}/base_dir/sub")), fs)
+        self.assertIn("into itself", str(ctx3.exception))
+
+        fs.cleanup()
+
+    def test_search_ambiguous_line_range_reporting(self):
+        doc = "line a\nhello world\nline b\nhello world\nline c\n"
+        with self.assertRaises(OpError) as ctx:
+            find_unique(doc, "hello world", "SEARCH", "ambiguous.py")
+        err_msg = str(ctx.exception)
+        self.assertIn("ERR|SEARCH_AMBIGUOUS|ambiguous.py|matched 2 times at [line 2, line 4]", err_msg)
+
+    def test_token_aware_python_matching(self):
+        doc = (
+            "def compute(a, b):\n"
+            "    value = 'sample_value'\n"
+            "    items = [1, 2, 3,]\n"
+            "    return items\n"
+        )
+        needle = (
+            'value = "sample_value"\n'
+            'items = [1, 2, 3]'
+        )
+        match = find_unique(doc, needle, "SEARCH", "test_app.py")
+        self.assertTrue(match.fuzzy)
+        self.assertIn("Python token normalization", match.note)
+
+    def test_oversized_search_block_handling_and_boundary_fallback(self):
+        # Construct a document with 80 distinct lines
+        doc_lines = [f"line_{i:03d} = {i}" for i in range(80)]
+        doc = "\n".join(doc_lines) + "\n"
+
+        # 1. Exact oversized search (> 60 lines) should match without throwing ERR|SEARCH_TOO_BIG
+        oversized_exact = "\n".join(doc_lines[5:70]) + "\n"
+        self.assertGreater(len(oversized_exact.split("\n")), 60)
+        match1 = find_unique(doc, oversized_exact, "SEARCH", "big_file.py")
+        self.assertEqual(doc[match1.start:match1.end], oversized_exact)
+
+        # 2. Oversized search with internal line drift matches via boundary anchors (Tier 8)
+        oversized_drift = [f"line_{i:03d} = {i}" for i in range(5, 70)]
+        oversized_drift[30] = "line_035 = modified_internally"
+        oversized_drift_str = "\n".join(oversized_drift)
+
+        match2 = find_unique(doc, oversized_drift_str, "SEARCH", "big_file.py")
+        self.assertTrue(match2.fuzzy)
+        self.assertIn("boundary anchors", match2.note)
+        self.assertEqual(match2.line_range, (5, 69))
+
+    def test_wildcard_pattern_move(self):
+        fs = RealFS(timeout=10)
+        # Create multiple files matching pattern test*
+        (self.scratch / "test_a.txt").write_text("a", encoding="utf-8")
+        (self.scratch / "test_b.txt").write_text("b", encoding="utf-8")
+        (self.scratch / "other.txt").write_text("other", encoding="utf-8")
+
+        # Move test* into destination folder
+        op = Operation("MOVE", (f"{self.scratch_rel}/test*", f"{self.scratch_rel}/test_folder"))
+        msg = execute(op, fs)
+        self.assertIn("Moved 2 file(s)", msg)
+        self.assertTrue((self.scratch / "test_folder/test_a.txt").is_file())
+        self.assertTrue((self.scratch / "test_folder/test_b.txt").is_file())
+        self.assertTrue((self.scratch / "other.txt").is_file())
+
+        # Rollback
+        errs = fs.rollback()
+        self.assertEqual(errs, [])
+        self.assertTrue((self.scratch / "test_a.txt").is_file())
+        self.assertTrue((self.scratch / "test_b.txt").is_file())
+        self.assertFalse((self.scratch / "test_folder/test_a.txt").exists())
+        fs.cleanup()
+
     def test_safe_path_extended_traversal_attempts(self):
         traversals = [
             f"{self.scratch_rel}/././../../outside.py",
