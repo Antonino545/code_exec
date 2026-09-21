@@ -211,8 +211,8 @@ def _find_closest_match(doc: str, needle: str) -> str:
     return ""
 
 
-MAX_SEARCH_LINES = 100
-MAX_SEARCH_CHARS = 8000
+MAX_SEARCH_LINES = 60
+MAX_SEARCH_CHARS = 4000
 
 
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:

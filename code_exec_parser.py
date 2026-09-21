@@ -261,6 +261,22 @@ def _read_delimited(lines: list[str], start: int) -> tuple[str, int]:
     return "\n".join(lines[start:k]), k + 1
 
 
+def _has_divider(lines: list[str], start: int) -> bool:
+    """Check whether an opening block contains an unnested ==== divider."""
+    depth = 1
+    for k in range(start, len(lines)):
+        line_str = lines[k].strip()
+        if _NEST_OPEN.match(line_str):
+            depth += 1
+        elif depth == 1 and _DIVIDER_LINE.match(line_str):
+            return True
+        elif _CLOSE_STRICT.match(line_str) or _CLOSE_LOOSE.match(line_str):
+            depth -= 1
+            if depth == 0:
+                return False
+    return False
+
+
 def _read_divided_block(lines: list[str], start: int) -> tuple[str, str, int]:
     """Read a dual <<<< ... ==== ... >>>> block and return (search, replace, next_line_index)."""
     depth = 1
@@ -337,14 +353,10 @@ def _unwrap(text: str) -> str:
 
 
 def _resolve_command(raw: str, rest: str) -> str | None:
-    """Canonical command for `raw` (case-insensitive, aliases allowed) or None."""
+    """Canonical command for `raw` (case-insensitive) or None."""
     upper = raw.strip().upper()
     if upper in COMMANDS:
         return upper
-    alias = COMMAND_ALIASES.get(upper)
-    # `rm -rf x` / `cp -r a b` are shell commands, not plan commands.
-    if alias and not rest.lstrip().startswith("-"):
-        return alias
     return None
 
 
@@ -406,8 +418,19 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         j = i
         while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
             j += 1
-        if inline_block or (j < len(lines) and _OPEN_LINE.match(lines[j].strip()) and not re.match(r"^SEARCH\b", lines[j].strip(), re.IGNORECASE)):
-            start_line = i if inline_block else j + 1
+
+        is_divided = False
+        start_line = i
+        if inline_block:
+            is_divided = True
+        elif j < len(lines):
+            line_j = lines[j].strip()
+            if re.match(r"^<{4,7}", line_j) or (_OPEN_LINE.match(line_j) and _has_divider(lines, j + 1)):
+                is_divided = True
+                start_line = j + 1
+                i = j + 1
+
+        if is_divided:
             search, replace, i = _read_divided_block(lines, start_line)
             return Operation(command, (path,), search, replace), i
 

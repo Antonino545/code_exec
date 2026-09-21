@@ -156,8 +156,14 @@ class TerminalUI:
     # ------------------------------------------------------------------ #
 
     def _width(self, max_cols: int | None = None) -> int:
-        cols = shutil.get_terminal_size((80, 24)).columns
-        return min(max(cols - 4, 58), max_cols or self.MAX_COLS)
+        target_cap = max_cols or self.MAX_COLS
+        is_tty = (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()) or (
+            hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+        )
+        if not is_tty:
+            return target_cap
+        cols = shutil.get_terminal_size((target_cap, 24)).columns
+        return min(max(cols - 4, 58), target_cap)
 
     def _edge(self, left: str, right: str, title: str, border_color: str | None, max_cols: int | None) -> str:
         c = self.palette
