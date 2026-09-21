@@ -702,6 +702,54 @@ class TerminalUI:
                 continue
             return answer in {"y", "yes"}
 
+    def searching(self, target: str):
+        """Context manager displaying a live searching indicator during expensive scans."""
+        class _SearchStatus:
+            def __init__(self, ui_inst, file_target: str):
+                self.ui = ui_inst
+                self.target = file_target
+                self.stop_event = None
+                self.thread = None
+
+            def __enter__(self):
+                import threading
+                import time
+
+                self.stop_event = threading.Event()
+                is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+                if not is_tty:
+                    return self
+
+                c = self.ui.palette
+
+                def _animate():
+                    dots = [".  ", ".. ", "...", "   "]
+                    idx = 0
+                    time.sleep(0.18)
+                    while not self.stop_event.is_set():
+                        dot = dots[idx % len(dots)]
+                        msg = f"\r  {c.paint('●', c.CYAN)} Searching in {c.paint(self.target, c.WHITE)} {c.paint(dot, c.AMBER)}"
+                        sys.stdout.write(msg)
+                        sys.stdout.flush()
+                        idx += 1
+                        time.sleep(0.18)
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
+
+                self.thread = threading.Thread(target=_animate, daemon=True)
+                self.thread.start()
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if self.stop_event:
+                    self.stop_event.set()
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(timeout=0.3)
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
+
+        return _SearchStatus(self, target)
+
     def show_diff(self, diff_text: str) -> None:
         c = self.palette
         if not diff_text.strip():

@@ -334,6 +334,11 @@ def _format_spans_error(err_prefix: str, target: str, spans: list[tuple[int, int
 
 
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
+    with ui.searching(target):
+        return _find_unique_impl(doc, needle, what, target)
+
+
+def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness:
       1. Exact byte-for-byte substring.
