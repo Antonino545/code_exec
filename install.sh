@@ -43,28 +43,37 @@ else
     fi
 fi
 
-# 3. Determine binary destination
-BIN_DIR=""
+# 3. Determine binary destination (prefer writable user bin for clean piped curl install)
+mkdir -p "$HOME/.local/bin" 2>/dev/null || true
+
 if [ -w "/usr/local/bin" ]; then
     BIN_DIR="/usr/local/bin"
-elif [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+elif [ -d "$HOME/.local/bin" ] && [ -w "$HOME/.local/bin" ]; then
     BIN_DIR="$HOME/.local/bin"
 else
-    BIN_DIR="/usr/local/bin"
+    BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$BIN_DIR"
 fi
 
 TARGET="$BIN_DIR/code-exec"
 
 # 4. Generate launcher script
-LAUNCHER_SCRIPT="#!/usr/bin/env bash\nexec python3 \"$INSTALL_DIR/code_exec.py\" \"\$@\""
+LAUNCHER_SCRIPT="#!/usr/bin/env bash
+exec python3 \"$INSTALL_DIR/code_exec.py\" \"\$@\""
 
 if [ -w "$BIN_DIR" ]; then
-    printf "$LAUNCHER_SCRIPT\n" > "$TARGET"
+    printf "%s\n" "$LAUNCHER_SCRIPT" > "$TARGET"
     chmod +x "$TARGET"
 else
     echo -e "${AMBER}!${RESET} Writing to $TARGET requires administrative permissions:"
-    printf "$LAUNCHER_SCRIPT\n" | sudo tee "$TARGET" >/dev/null
-    sudo chmod +x "$TARGET"
+    # Use /dev/tty if stdin is tied to curl pipe
+    if [ -t 0 ]; then
+        printf "%s\n" "$LAUNCHER_SCRIPT" | sudo tee "$TARGET" >/dev/null
+        sudo chmod +x "$TARGET"
+    else
+        printf "%s\n" "$LAUNCHER_SCRIPT" | sudo tee "$TARGET" >/dev/null </dev/tty
+        sudo chmod +x "$TARGET" </dev/tty
+    fi
 fi
 
 echo -e "${GREEN}✓${RESET} Binary installed at: ${BOLD}$TARGET${RESET}"
@@ -77,20 +86,33 @@ if [ "$(uname -s)" = "Linux" ]; then
     fi
 fi
 
-# 6. Ensure PATH inclusion
+# 6. Ensure persistent PATH inclusion
+add_to_path() {
+    local rc_file="$1"
+    local bin_path="$2"
+    if [ -f "$rc_file" ]; then
+        if ! grep -qs "$bin_path" "$rc_file"; then
+            printf "\n# code-exec path\nexport PATH=\"%s:\$PATH\"\n" "$bin_path" >> "$rc_file"
+            echo -e "${GREEN}✓${RESET} Added ${BOLD}$bin_path${RESET} to ${BOLD}$rc_file${RESET}"
+            UPDATED_RC="$rc_file"
+        fi
+    fi
+}
+
+UPDATED_RC=""
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
-        echo -e "${AMBER}! Note: $BIN_DIR is not in your current PATH.${RESET}"
-        SHELL_RC=""
-        if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
-            SHELL_RC="$HOME/.zshrc"
-        elif [ -f "$HOME/.bashrc" ]; then
-            SHELL_RC="$HOME/.bashrc"
-        fi
-        if [ -n "$SHELL_RC" ]; then
-            echo "export PATH=\"\$PATH:$BIN_DIR\"" >> "$SHELL_RC"
-            echo -e "  Added to ${BOLD}$SHELL_RC${RESET}. Run: ${BOLD}source $SHELL_RC${RESET}"
+        # Detect shell configuration files
+        add_to_path "$HOME/.zshrc" "$BIN_DIR"
+        add_to_path "$HOME/.bashrc" "$BIN_DIR"
+        add_to_path "$HOME/.bash_profile" "$BIN_DIR"
+        add_to_path "$HOME/.profile" "$BIN_DIR"
+
+        if [ -n "$UPDATED_RC" ]; then
+            echo -e "${AMBER}!${RESET} To update your current terminal session, run: ${BOLD}source $UPDATED_RC${RESET}"
+        else
+            echo -e "${AMBER}!${RESET} Please ensure ${BOLD}$BIN_DIR${RESET} is included in your PATH."
         fi
         ;;
 esac
