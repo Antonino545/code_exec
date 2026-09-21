@@ -168,6 +168,30 @@ class TestCodeExecCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=f"CLI failed: {result.stderr}")
         self.assertEqual(target.read_text(encoding="utf-8"), "def run():\n    return True\n")
 
+    def test_e2e_divider_syntax_execution(self):
+        target = self.root / "App.jsx"
+        target.write_text(
+            "function App() {\n"
+            "  return <ScreensaverView timer={false} />;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        fence = chr(96) * 3
+        response = (
+            "Here is the update using divider syntax:\n\n"
+            f"{fence}code_exec\n"
+            "EDIT App.jsx\n"
+            "<<<<\n"
+            "  return <ScreensaverView timer={false} />;\n"
+            "====\n"
+            "  return <ScreensaverView timer={true} rawStates={rawStates} />;\n"
+            ">>>>\n"
+            f"{fence}\n"
+        )
+        result = self.run_cli(response)
+        self.assertEqual(result.returncode, 0, msg=f"CLI failed: {result.stderr}")
+        self.assertIn("timer={true} rawStates={rawStates}", target.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -816,6 +816,139 @@ class TestCodeExecExtractionAndValidation(unittest.TestCase):
             self.assertEqual(tui.prompt_choice("Proceed", default="n"), "yes")
             self.assertEqual(tui.prompt_choice("Interrupted", default="fallback"), "fallback")
 
+    def test_divider_syntax_basic(self):
+        plan_text = (
+            "EDIT src/App.jsx\n"
+            "<<<<\n"
+            "old code\n"
+            "====\n"
+            "new code\n"
+            ">>>>\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "EDIT")
+        self.assertEqual(ops[0].args[0], "src/App.jsx")
+        self.assertEqual(ops[0].data, "old code")
+        self.assertEqual(ops[0].extra, "new code")
+
+    def test_divider_syntax_inline_opener(self):
+        plan_text = (
+            "EDIT src/Component.jsx <<<<\n"
+            "line A\n"
+            "====\n"
+            "line B\n"
+            ">>>>\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "EDIT")
+        self.assertEqual(ops[0].args[0], "src/Component.jsx")
+        self.assertEqual(ops[0].data, "line A")
+        self.assertEqual(ops[0].extra, "line B")
+
+    def test_divider_syntax_git_conflict_headers(self):
+        plan_text = (
+            "EDIT config.py\n"
+            "<<<<<<< SEARCH\n"
+            "DEBUG = True\n"
+            "=======\n"
+            "DEBUG = False\n"
+            ">>>>>>> REPLACE\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].data, "DEBUG = True")
+        self.assertEqual(ops[0].extra, "DEBUG = False")
+
+    def test_replace_all_divider_syntax(self):
+        plan_text = (
+            "REPLACE_ALL strings.json\n"
+            "<<<<\n"
+            '"active": false\n'
+            "====\n"
+            '"active": true\n'
+            ">>>>\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "REPLACE_ALL")
+        self.assertEqual(ops[0].args[0], "strings.json")
+        self.assertEqual(ops[0].data, '"active": false')
+        self.assertEqual(ops[0].extra, '"active": true')
+
+    def test_divider_syntax_missing_divider_error(self):
+        plan_text = (
+            "EDIT broken.txt\n"
+            "<<<<\n"
+            "content without divider\n"
+            ">>>>\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations(plan_text)
+        self.assertIn("Missing ====", str(ctx.exception))
+
+    def test_divider_syntax_missing_closer_error(self):
+        plan_text = (
+            "EDIT unclosed.txt\n"
+            "<<<<\n"
+            "search part\n"
+            "====\n"
+            "replace part\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            parse_operations(plan_text)
+        self.assertIn("Missing >>>>", str(ctx.exception))
+
+    def test_divider_syntax_with_nested_delimiters(self):
+        plan_text = (
+            "EDIT logic.py\n"
+            "<<<<\n"
+            "if a < b and c > d:\n"
+            "    return True\n"
+            "====\n"
+            "if a <= b and c >= d:\n"
+            "    return False\n"
+            ">>>>\n"
+        )
+        ops = parse_operations(plan_text)
+        self.assertEqual(len(ops), 1)
+        self.assertIn("if a < b", ops[0].data)
+        self.assertIn("if a <= b", ops[0].extra)
+
+    def test_generic_fence_fallback_extraction(self):
+        ai_response = (
+            "Here is the code edit:\n\n"
+            "```diff\n"
+            "EDIT src/utils.py\n"
+            "<<<<\n"
+            "timeout = 10\n"
+            "====\n"
+            "timeout = 30\n"
+            ">>>>\n"
+            "```\n"
+        )
+        plan = extract_plan(ai_response)
+        ops = parse_operations(plan)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].command, "EDIT")
+        self.assertEqual(ops[0].args[0], "src/utils.py")
+        self.assertEqual(ops[0].data, "timeout = 10")
+        self.assertEqual(ops[0].extra, "timeout = 30")
+
+    def test_divider_syntax_execution_with_jsx_normalization(self):
+        vfs = VirtualFS()
+        target = ROOT / "Component.jsx"
+        vfs.write(target, "        <ScreensaverView clock={clock} weather={weather} />\n")
+        op = Operation(
+            "EDIT",
+            ("Component.jsx",),
+            "<ScreensaverView clock={clock} weather={weather} />\n",
+            "<ScreensaverView clock={clock} weather={weather} timers={timers} />\n",
+        )
+        execute(op, vfs)
+        self.assertIn("timers={timers}", vfs.read(target))
+
 
 if __name__ == "__main__":
     unittest.main()
