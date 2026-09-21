@@ -300,7 +300,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 diff_lines.extend(diff)
             except Exception:
                 pass
-        elif cmd in {"TOUCH", "CHMOD"}:
+        elif cmd in {"TOUCH", "CHMOD", "MKDIR"}:
             try:
                 execute(op, vfs)
             except Exception:
@@ -593,7 +593,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
-                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH"}:
+                if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH", "MKDIR"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
                     modified_paths.extend([op.args[0], op.args[1]])

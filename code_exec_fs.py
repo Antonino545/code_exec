@@ -142,7 +142,7 @@ class VirtualFS:
         if path in self.state:
             return self.state[path]
         for parent in path.parents:
-            if parent in self.state:
+            if self.state.get(parent) == ("gone",):
                 return ("gone",)
         return None
 
@@ -482,7 +482,10 @@ def undo_last_run() -> tuple[bool, str]:
                 if slot_path.exists():
                     _remove(path)
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(slot_path, path)
+                    if slot_path.is_dir():
+                        shutil.copytree(slot_path, path, symlinks=True)
+                    else:
+                        shutil.copy2(slot_path, path)
                     restored_count += 1
             elif kind == "move_back" and slot:
                 src_path = ROOT / slot
