@@ -738,11 +738,11 @@ def main(argv=None) -> int:
     parser.add_argument("-p", "--prompt", "--copy-instructions", dest="prompt", action="store_true",
                         help="Copy code_exec_instructions.md to the clipboard for your AI prompt")
     parser.add_argument("--export-context", "--export-concet", "--export-plan", "--context", dest="export_plan", action="store_true",
-                        help="Export a clean project folder (.context) excluding temp/caches with file and token counts")
-    parser.add_argument("--ignore-file", default=None,
+                        help="Export a clean project folder (context) excluding temp/caches with file and token counts")
+    parser.add_argument("--ignore-file", default=".code-exec-ignore",
                         help="Path or name of custom ignore configuration file (default: .code-exec-ignore)")
-    parser.add_argument("--target-dir", default=".context",
-                        help="Target output directory for clean plan export (default: .context)")
+    parser.add_argument("--target-dir", default="context",
+                        help="Target output directory for clean plan export (default: context)")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
     parser.add_argument("--tree", action="store_true",
@@ -832,6 +832,7 @@ def main(argv=None) -> int:
         args.yes,
         args.no_run,
         args.no_commit,
+        args.export_plan,
     ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
@@ -870,10 +871,12 @@ def main(argv=None) -> int:
     if args.export_plan:
         from code_exec_plan_export import create_plan_folder
         try:
+            target_out = args.target_dir or "context"
             res = create_plan_folder(
                 export_all=True,
-                output_dirname=args.target_dir,
+                output_dirname=target_out,
                 ignore_filename=args.ignore_file,
+                root=Path.cwd().resolve(),
             )
             ui.plan_export_success(
                 location=str(res["location"]),

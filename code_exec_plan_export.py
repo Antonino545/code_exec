@@ -17,6 +17,17 @@ DEFAULT_IGNORE_PATTERNS = [
     ".plan-only/",
     ".context",
     ".context/",
+    "context",
+    "context/",
+    ".idea",
+    ".idea/",
+    ".vscode",
+    ".vscode/",
+    ".storage",
+    ".storage/",
+    "secrets",
+    "secrets/",
+    "*.secret*",
     "node_modules",
     "node_modules/",
     "dist",
@@ -38,10 +49,50 @@ DEFAULT_IGNORE_PATTERNS = [
     "__pycache__",
     "__pycache__/",
     ".env*",
+    # Lockfiles & package manager state
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "poetry.lock",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    # OS & editor metadata
+    ".DS_Store",
+    "Thumbs.db",
+    # Minified assets & sourcemaps
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    # Archives & binaries
+    "*.tar",
+    "*.tar.gz",
+    "*.zip",
+    "*.rar",
+    "*.7z",
+    "*.gz",
+    "*.pdf",
+    # Media & fonts
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.svg",
+    "*.webp",
+    "*.mp3",
+    "*.mp4",
+    "*.mov",
+    "*.avi",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
 ]
 
 
-def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) -> tuple[list[str], str]:
+def load_ignore_patterns(root: Path | None = None, ignore_filename: str | None = ".code-exec-ignore") -> tuple[list[str], str]:
     """
     Loads exclusion patterns, always preserving DEFAULT_IGNORE_PATTERNS (caches, temp, artifacts).
     Checks candidate ignore files in priority order:
@@ -51,8 +102,12 @@ def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) 
       4. .ignorefile
       5. .gitignore
     """
+    if root is None:
+        root = Path.cwd().resolve()
     patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
-    candidates = [ignore_filename] if ignore_filename else []
+    candidates: list[str] = []
+    if ignore_filename and ignore_filename != ".code-exec-ignore":
+        candidates.append(ignore_filename)
     candidates.extend([".code-exec-ignore", "code-exec-ignore", ".ignorefile", ".gitignore"])
 
     found_path: Path | None = None
@@ -86,15 +141,14 @@ def _pattern_matches(rel_path_posix: str, is_dir: bool, pattern: str) -> bool:
     if not pattern:
         return False
 
-    dir_only = pattern.endswith("/")
     clean_pat = pattern.rstrip("/")
+    pat_clean = clean_pat.lstrip("/")
 
-    if dir_only and not is_dir:
-        parts = rel_path_posix.split("/")[:-1]
-        for part in parts:
-            if fnmatch.fnmatch(part, clean_pat):
-                return True
-        return False
+    # Check exact match or prefix directory match (matches all files under that folder)
+    if rel_path_posix == pat_clean or rel_path_posix.startswith(f"{pat_clean}/"):
+        return True
+    if fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}") or fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}/*"):
+        return True
 
     parts = rel_path_posix.split("/")
     filename = parts[-1]
@@ -102,12 +156,12 @@ def _pattern_matches(rel_path_posix: str, is_dir: bool, pattern: str) -> bool:
     if "/" not in clean_pat:
         if fnmatch.fnmatch(filename, clean_pat):
             return True
+        # If any directory segment matches the pattern
         for part in parts:
             if fnmatch.fnmatch(part, clean_pat):
                 return True
     else:
-        pat_clean = clean_pat.lstrip("/")
-        if fnmatch.fnmatch(rel_path_posix, pat_clean) or fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}"):
+        if fnmatch.fnmatch(rel_path_posix, pat_clean) or fnmatch.fnmatch(rel_path_posix, f"{pat_clean}/*"):
             return True
 
     return False
@@ -164,9 +218,9 @@ def estimate_tokens(text: str) -> int:
 
 def create_plan_folder(
     plan_text: str | None = None,
-    output_dirname: str = ".context",
-    ignore_filename: str | None = None,
-    root: Path = ROOT,
+    output_dirname: str = "context",
+    ignore_filename: str | None = ".code-exec-ignore",
+    root: Path | None = None,
     export_all: bool = True,
 ) -> dict[str, int | str]:
     """
@@ -174,10 +228,17 @@ def create_plan_folder(
     excluding temporary files, caches, and build artifacts.
     Computes total file count and estimated LLM tokens.
     """
+    if root is None:
+        root = Path.cwd().resolve()
     target_dir = root / output_dirname
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
-    # Collect candidate files (default to entire clean workspace)
+    # 1. Immediately wipe any existing context folder first to avoid scanning old exports
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Collect candidate files from clean workspace
     candidate_files: list[Path] = []
     requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
 
@@ -197,6 +258,12 @@ def create_plan_folder(
                 candidate_files.append(m_path)
     else:
         for p in root.rglob("*"):
+            # Never include target_dir even if partially created
+            try:
+                if target_dir in p.parents or p.resolve() == target_dir.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                pass
             if p.is_file():
                 candidate_files.append(p)
 
@@ -222,10 +289,6 @@ def create_plan_folder(
             total_bytes += file_path.stat().st_size
         except OSError:
             pass
-
-    if target_dir.exists():
-        shutil.rmtree(target_dir, ignore_errors=True)
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     for file_path in included_files:
         rel_path = file_path.relative_to(root)
