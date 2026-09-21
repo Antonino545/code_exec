@@ -17,6 +17,15 @@ DEFAULT_IGNORE_PATTERNS = [
     ".plan-only/",
     ".context",
     ".context/",
+    ".idea",
+    ".idea/",
+    ".vscode",
+    ".vscode/",
+    ".storage",
+    ".storage/",
+    "secrets",
+    "secrets/",
+    "*.secret*",
     "node_modules",
     "node_modules/",
     "dist",
@@ -88,15 +97,14 @@ def _pattern_matches(rel_path_posix: str, is_dir: bool, pattern: str) -> bool:
     if not pattern:
         return False
 
-    dir_only = pattern.endswith("/")
     clean_pat = pattern.rstrip("/")
+    pat_clean = clean_pat.lstrip("/")
 
-    if dir_only and not is_dir:
-        parts = rel_path_posix.split("/")[:-1]
-        for part in parts:
-            if fnmatch.fnmatch(part, clean_pat):
-                return True
-        return False
+    # Check exact match or prefix directory match (matches all files under that folder)
+    if rel_path_posix == pat_clean or rel_path_posix.startswith(f"{pat_clean}/"):
+        return True
+    if fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}") or fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}/*"):
+        return True
 
     parts = rel_path_posix.split("/")
     filename = parts[-1]
@@ -104,12 +112,12 @@ def _pattern_matches(rel_path_posix: str, is_dir: bool, pattern: str) -> bool:
     if "/" not in clean_pat:
         if fnmatch.fnmatch(filename, clean_pat):
             return True
+        # If any directory segment matches the pattern
         for part in parts:
             if fnmatch.fnmatch(part, clean_pat):
                 return True
     else:
-        pat_clean = clean_pat.lstrip("/")
-        if fnmatch.fnmatch(rel_path_posix, pat_clean) or fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}"):
+        if fnmatch.fnmatch(rel_path_posix, pat_clean) or fnmatch.fnmatch(rel_path_posix, f"{pat_clean}/*"):
             return True
 
     return False
