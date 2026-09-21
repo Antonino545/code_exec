@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import fnmatch
+import os
+import shutil
+from pathlib import Path
+
+from code_exec_parser import extract_plan, parse_operations
+from code_exec_types import PROTECTED_FILE_EXACT, PROTECTED_NAMES, PROTECTED_SUFFIXES, ROOT, OpError
+
+DEFAULT_IGNORE_PATTERNS = [
+    ".git",
+    ".git/",
+    ".code_exec",
+    ".code_exec/",
+    ".plan-only",
+    ".plan-only/",
+    ".context",
+    ".context/",
+    "node_modules",
+    "node_modules/",
+    "dist",
+    "dist/",
+    "build",
+    "build/",
+    "coverage",
+    "coverage/",
+    ".tmp",
+    ".tmp/",
+    "temp",
+    "temp/",
+    ".cache",
+    ".cache/",
+    "*.tmp",
+    "*.log",
+    "*.bak",
+    "*.pyc",
+    "__pycache__",
+    "__pycache__/",
+    ".env*",
+]
+
+
+def load_ignore_patterns(root: Path = ROOT, ignore_filename: str | None = None) -> tuple[list[str], str]:
+    """
+    Loads exclusion patterns, always preserving DEFAULT_IGNORE_PATTERNS (caches, temp, artifacts).
+    Checks candidate ignore files in priority order:
+      1. Explicitly provided filename (if valid)
+      2. .code-exec-ignore
+      3. code-exec-ignore
+      4. .ignorefile
+      5. .gitignore
+    """
+    patterns: list[str] = list(DEFAULT_IGNORE_PATTERNS)
+    candidates = [ignore_filename] if ignore_filename else []
+    candidates.extend([".code-exec-ignore", "code-exec-ignore", ".ignorefile", ".gitignore"])
+
+    found_path: Path | None = None
+    used_file = "(built-in defaults)"
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        p = root / candidate
+        if p.is_file():
+            found_path = p
+            used_file = candidate
+            break
+
+    if found_path is not None:
+        try:
+            lines = found_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for raw in lines:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                patterns.append(line)
+        except OSError:
+            pass
+
+    return patterns, used_file
+
+
+def _pattern_matches(rel_path_posix: str, is_dir: bool, pattern: str) -> bool:
+    pattern = pattern.strip()
+    if not pattern:
+        return False
+
+    dir_only = pattern.endswith("/")
+    clean_pat = pattern.rstrip("/")
+
+    if dir_only and not is_dir:
+        parts = rel_path_posix.split("/")[:-1]
+        for part in parts:
+            if fnmatch.fnmatch(part, clean_pat):
+                return True
+        return False
+
+    parts = rel_path_posix.split("/")
+    filename = parts[-1]
+
+    if "/" not in clean_pat:
+        if fnmatch.fnmatch(filename, clean_pat):
+            return True
+        for part in parts:
+            if fnmatch.fnmatch(part, clean_pat):
+                return True
+    else:
+        pat_clean = clean_pat.lstrip("/")
+        if fnmatch.fnmatch(rel_path_posix, pat_clean) or fnmatch.fnmatch(rel_path_posix, f"*/{pat_clean}"):
+            return True
+
+    return False
+
+
+def is_path_ignored(rel_path: Path, is_dir: bool, patterns: list[str]) -> bool:
+    rel_posix = rel_path.as_posix()
+    parts = [p.lower() for p in rel_path.parts]
+
+    if any(part in PROTECTED_NAMES for part in parts):
+        return True
+    file_name = rel_path.name.lower()
+    if file_name in PROTECTED_FILE_EXACT or any(file_name.endswith(ext) for ext in PROTECTED_SUFFIXES):
+        return True
+
+    for pat in patterns:
+        if _pattern_matches(rel_posix, is_dir, pat):
+            return True
+    return False
+
+
+def extract_files_from_plan(plan_text: str) -> list[str]:
+    """Extracts target file paths explicitly referenced in plan instructions."""
+    if not plan_text or not plan_text.strip():
+        return []
+
+    try:
+        clean_plan = extract_plan(plan_text)
+        operations = parse_operations(clean_plan)
+    except Exception:
+        return []
+
+    targets = []
+    for op in operations:
+        if op.command in {"RUN", "COMMIT"} or not op.args:
+            continue
+        for arg in op.args:
+            arg_str = str(arg).strip().replace("\\", "/").rstrip("/")
+            if arg_str and not any(ch in arg_str for ch in ("*", "?", "[")) and not arg_str.startswith("regex:"):
+                targets.append(arg_str)
+
+    return list(dict.fromkeys(targets))
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimates LLM token count using a blend of whitespace splits and character length."""
+    if not text:
+        return 0
+    words = len(text.split())
+    chars = len(text)
+    # Heuristic: ~4 chars per token for code/prose, blended with word count
+    return max(words, int(chars / 3.8))
+
+
+def create_plan_folder(
+    plan_text: str | None = None,
+    output_dirname: str = ".context",
+    ignore_filename: str | None = None,
+    root: Path = ROOT,
+    export_all: bool = True,
+) -> dict[str, int | str]:
+    """
+    Creates or cleanly refreshes a clean project context folder,
+    excluding temporary files, caches, and build artifacts.
+    Computes total file count and estimated LLM tokens.
+    """
+    target_dir = root / output_dirname
+    patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
+
+    # Collect candidate files (default to entire clean workspace)
+    candidate_files: list[Path] = []
+    requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
+
+    if requested_paths:
+        for p_str in requested_paths:
+            p = root / p_str
+            if p.is_file():
+                candidate_files.append(p)
+            elif p.is_dir():
+                for sub in p.rglob("*"):
+                    if sub.is_file():
+                        candidate_files.append(sub)
+
+        for manifest in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "README.md"):
+            m_path = root / manifest
+            if m_path.is_file() and m_path not in candidate_files:
+                candidate_files.append(m_path)
+    else:
+        for p in root.rglob("*"):
+            if p.is_file():
+                candidate_files.append(p)
+
+    included_files: list[Path] = []
+    ignored_count = 0
+    total_bytes = 0
+    total_tokens = 0
+
+    for file_path in candidate_files:
+        try:
+            rel_path = file_path.relative_to(root)
+        except ValueError:
+            continue
+
+        if is_path_ignored(rel_path, is_dir=False, patterns=patterns):
+            ignored_count += 1
+            continue
+
+        included_files.append(file_path)
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            total_tokens += estimate_tokens(content)
+            total_bytes += file_path.stat().st_size
+        except OSError:
+            pass
+
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    for file_path in included_files:
+        rel_path = file_path.relative_to(root)
+        dest_file = target_dir / rel_path
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_path, dest_file)
+
+    return {
+        "location": f"{output_dirname}/",
+        "included": len(included_files),
+        "ignored": ignored_count,
+        "tokens": total_tokens,
+        "size_kb": round(total_bytes / 1024, 1),
+        "ignore_file": used_ignore,
+    }

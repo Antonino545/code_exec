@@ -100,7 +100,7 @@ _OPEN_LINE = re.compile(r"^<{1,5}$")          # opener on its own line
 _OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,5}$")  # opener at the end of a command line
 _NEST_OPEN = re.compile(r"^<{3,5}$")          # nested block inside content
 _CLOSE_STRICT = re.compile(r"^>{2,5}$")
-_DIFF_OPEN = re.compile(r"^<{3,}\s*(?:SEARCH|ORIGINAL|OLD|MARKER)?\s*:?\s*$", re.IGNORECASE)
+_DIFF_OPEN = re.compile(r"^(?:(?:SEARCH|MARKER)\s*:?\s*)?<{3,}\s*(?:SEARCH|ORIGINAL|OLD|MARKER)?\s*:?\s*$", re.IGNORECASE)
 _DIFF_SEP = re.compile(r"^={3,}\s*$")
 _DIFF_CLOSE = re.compile(r"^>{3,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", re.IGNORECASE)
 _ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
@@ -568,6 +568,19 @@ def _try_diff_pair(lines: list[str], i: int, command: str) -> tuple[str, str, in
     if end < 0:
         raise ValueError(f"{command}: missing >>>> for block opened at line {j + 1}")
     sep = next((k for k in range(start, end) if _DIFF_SEP.match(lines[k].strip())), -1)
+    keyword_opened = not lines[j].strip().startswith("<")
+    if keyword_opened:
+        # `SEARCH <<<` is only a hybrid (keyword opener + ==== separator) when the block has a
+        # separator AND is not followed by the matching REPLACE/CONTENT keyword; otherwise it is
+        # a normal keyword block whose text merely contains a `====` line.
+        second_kw = "CONTENT" if command.startswith("INSERT") else "REPLACE"
+        nxt = end + 1
+        while nxt < len(lines) and (not lines[nxt].strip() or lines[nxt].strip().startswith("#")):
+            nxt += 1
+        followed = nxt < len(lines) and re.match(rf"^{second_kw}\s*:?\s*(<{{1,5}})?\s*$", lines[nxt].strip(), re.IGNORECASE)
+        if sep < 0 or followed:
+            return None
+        _warn(f"line {j + 1}: mixed block styles ('{lines[j].strip()}' with '===='); read as conflict-marker block")
     if sep < 0:
         raise ValueError(f"{command}: missing ==== separator in block opened at line {j + 1}")
     return "\n".join(lines[start:sep]), "\n".join(lines[sep + 1:end]), end + 1
