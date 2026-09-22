@@ -500,32 +500,65 @@ class TerminalUI:
     def interactive_menu(self, root: Path) -> str:
         c = self.palette
         self.header(root)
-        items = [
-            ("1", "Apply plan", "from clipboard", ""),
-            ("2", "Dry-run", "validate plan from clipboard", "--dry-run"),
-            ("3", "Copy AI prompt", "instructions to clipboard", "-p"),
-            ("4", "Quick guide", "syntax & CLI reference", "-h"),
-            ("5", "Check updates", "install latest from GitHub", "update"),
-            ("6", "Undo last plan", "revert file changes", "undo"),
-            ("7", "Commit prompt", "git diff prompt to clipboard", "-c"),
-            ("8", "Export context", "clean project folder (context)", "export-context"),
+
+        # 1. Onboarding Quick-Start Panel
+        repo_url = "https://github.com/antonino54/code_exec"
+        flow_lines = [
+            "",
+            f"  {c.paint('Step 1', c.CORAL, bold=True)}  {c.paint('Copy Instructions', c.WHITE, bold=True)}   Run {c.paint('code-exec -p', c.CYAN)} (menu 3) to copy instructions",
+            f"  {c.paint('Step 2', c.CORAL, bold=True)}  {c.paint('Export Context', c.WHITE, bold=True)}      Run {c.paint('code-exec export-context --compact', c.CYAN)} (menu 8)",
+            f"  {c.paint('Step 3', c.CORAL, bold=True)}  {c.paint('Send to Any AI', c.WHITE, bold=True)}      Attach context/ & instructions into chat; ask for changes",
+            f"  {c.paint('Step 4', c.CORAL, bold=True)}  {c.paint('Apply Safely', c.WHITE, bold=True)}        Copy AI reply, then run {c.paint('code-exec', c.GREEN, bold=True)} (menu 1)",
+            "",
+            self._divider("Online Guide"),
+            f"  {c.paint('Web Docs:', c.SLATE)}  {c.paint(f'{repo_url}#readme', c.CYAN, bold=True)}  (Run {c.paint('code-exec docs', c.WHITE)})",
+            "",
         ]
-        lines = [""]
-        for key, label, desc, flag in items:
-            key_s = c.paint(key, c.CORAL, bold=True)
-            label_s = c.paint(f"{label:<16}", c.WHITE, bold=True)
-            desc_s = c.paint(f"{desc:<30}", c.SLATE)
-            flag_s = c.paint(flag, c.CYAN) if flag else ""
-            lines.append(self._line(f"{key_s}  {label_s}{desc_s}  {flag_s}".rstrip()))
+        self.render_panel(title=self._title("How it works", "info"), lines=flow_lines)
+        print()
+
+        # 2. Categorized Menu Options
+        lines = [self._divider("Apply & Validate")]
+        row_fmt = lambda key, label, desc, flag: f"  {c.paint(key, c.CORAL, bold=True)}  {c.paint(f'{label:<17}', c.WHITE, bold=True)}{c.paint(f'{desc:<28}', c.SLATE)}  {c.paint(flag, c.CYAN)}"
+
+        lines.append(row_fmt("1", "Apply plan", "read clipboard & execute", "apply"))
+        lines.append(row_fmt("2", "Dry-run", "simulate without writing", "--dry-run"))
+        lines.append(row_fmt("6", "Undo changes", "revert last applied plan", "undo"))
+
+        lines.append(self._divider("Context & AI Helpers"))
+        lines.append(row_fmt("3", "Copy prompt", "system prompt to clipboard", "-p"))
+        lines.append(row_fmt("8", "Export context", "clean project tree for AI", "export-context"))
+        lines.append(row_fmt("7", "Commit prompt", "stage diff prompt for AI", "-c"))
+
+        lines.append(self._divider("Documentation & Setup"))
+        lines.append(row_fmt("4", "Quick guide", "terminal syntax & CLI cheat-sheet", "-h"))
+        lines.append(row_fmt("d", "Online docs", "open GitHub guide in browser", "docs"))
+        lines.append(row_fmt("5", "Check updates", "pull latest from GitHub", "update"))
         lines.append(self._line(f"{c.paint('q', c.SLATE, bold=True)}  {c.paint('Exit', c.SLATE)}"))
         lines.append("")
-        self.render_panel(title=self._title("Menu", "brand"), lines=lines)
+
+        self.render_panel(title=self._title("Actions", "brand"), lines=lines)
         print()
         try:
-            return self.prompt_choice("Choose an option [1-8/q]", default="q").lower()
+            return self.prompt_choice("Choose an option [1-8/d/q]", default="q").lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return "q"
+
+    def open_web_guide(self) -> None:
+        import webbrowser
+        c = self.palette
+        url = "https://github.com/antonino54/code_exec#readme"
+        lines = [
+            self._line("Opening online documentation & guide in your browser...", c.WHITE, bold=True),
+            self._kv("URL", c.paint(url, c.CYAN, bold=True)),
+            self._tip("Star or bookmark the repository for updates and examples."),
+        ]
+        self._card("GitHub Guide", "info", lines)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Apply flow

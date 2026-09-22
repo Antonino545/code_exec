@@ -941,6 +941,9 @@ def main(argv=None) -> int:
     elif args.action in {"5", "update"}:
         from code_exec_updater import update_code_exec
         return 0 if update_code_exec() else 1
+    elif args.action in {"d", "docs", "doc", "web-guide", "guide-online", "online-guide"}:
+        ui.open_web_guide()
+        return 0
     elif args.action in {"6", "undo"}:
         success, msg = undo_last_run()
         if success:
@@ -1024,6 +1027,9 @@ def main(argv=None) -> int:
             args.prompt = True
         elif choice == "4":
             args.help = True
+        elif choice in {"d", "docs", "doc", "web-guide", "online-guide"}:
+            ui.open_web_guide()
+            return 0
         elif choice in {"5", "u", "update"}:
             from code_exec_updater import update_code_exec
             return 0 if update_code_exec() else 1
