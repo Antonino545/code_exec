@@ -25,6 +25,7 @@ import argparse
 import difflib
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -974,7 +975,48 @@ def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, 
     return result_text, len(fetch_ops), total_lines, tokens
 
 
-def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False, match_cache: dict | None = None) -> int:
+def detect_verification_command() -> str | None:
+    """Auto-detects a reasonable lint/typecheck/test command for the project."""
+    if (ROOT / ".code-exec-verify").is_file():
+        cmd = (ROOT / ".code-exec-verify").read_text(encoding="utf-8").strip()
+        if cmd:
+            return cmd
+
+    if (ROOT / "package.json").is_file():
+        if (ROOT / "tsconfig.json").is_file():
+            return "npx tsc --noEmit"
+        return "npm test"
+    elif (ROOT / "Cargo.toml").is_file():
+        return "cargo test"
+    elif (ROOT / "pyproject.toml").is_file() or (ROOT / "setup.py").is_file() or any(ROOT.glob("test*.py")):
+        if shutil.which("ruff"):
+            return "ruff check ."
+        elif shutil.which("pytest") and (ROOT / "tests").is_dir():
+            return "pytest"
+        return "python3 -m unittest"
+    return None
+
+
+def copy_verification_error_to_clipboard(cmd: str, returncode: int, output: str, modified_files: list[str]) -> None:
+    """Formats verification failure into a structured AI retry prompt on the clipboard."""
+    fence = chr(96) * 3
+    file_list = ", ".join(f"`{f}`" for f in modified_files) if modified_files else "the modified files"
+    prompt = (
+        f"The previous `code_exec` changes were applied, but the verification hook failed.\n\n"
+        f"**Command executed:** `{cmd}` (exit code {returncode})\n\n"
+        f"**Error Output:**\n"
+        f"{fence}\n"
+        f"{output.strip()}\n"
+        f"{fence}\n\n"
+        f"### Instructions for the fix:\n"
+        f"- Analyze the compiler, linter, or test failures shown above.\n"
+        f"- Fix only the errors in {file_list}.\n"
+        f"- Provide an updated {fence}code_exec ...{fence} plan block with the necessary EDITs."
+    )
+    set_clipboard(prompt)
+
+
+def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False, match_cache: dict | None = None, verify_cmd: str | None = None) -> int:
     fetch_ops = [op for op in operations if op.command == "FETCH"]
     exec_ops = [op for op in operations if op.command not in {"COMMIT", "FETCH"}]
 
@@ -1043,6 +1085,37 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
     fs.save_backup_manifest()
     ui.done()
+
+    # Post-apply verification hook (--verify)
+    if verify_cmd:
+        actual_verify_cmd = detect_verification_command() if verify_cmd == "auto" else verify_cmd
+        if actual_verify_cmd:
+            print(ui.palette.paint(f"\n  🔍 Running post-apply verification: {actual_verify_cmd} ...", ui.palette.CYAN, bold=True))
+            try:
+                res = subprocess.run(
+                    actual_verify_cmd,
+                    shell=True,
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout or 60,
+                )
+                if res.returncode != 0:
+                    ui.error(f"Verification failed ({actual_verify_cmd}): exit code {res.returncode}")
+                    print(res.stdout)
+                    unique_modified = list(dict.fromkeys(modified_paths))
+                    copy_verification_error_to_clipboard(actual_verify_cmd, res.returncode, res.stdout, unique_modified)
+                    print(ui.palette.paint("  📋 Verification error and fix prompt copied to clipboard!\n", ui.palette.AMBER, bold=True))
+                    return res.returncode
+                else:
+                    print(ui.palette.paint("  ✓ Verification passed cleanly!\n", ui.palette.GREEN, bold=True))
+            except subprocess.TimeoutExpired:
+                ui.error(f"Verification timed out after {timeout or 60} seconds.")
+                return 1
+            except Exception as exc:
+                ui.error(f"Failed to execute verification hook: {exc}")
+                return 1
 
     if commit_msg and not no_commit:
         should_commit = auto_commit or (not exec_ops) or ui.prompt_commit(commit_msg)
@@ -1384,7 +1457,7 @@ def main(argv=None) -> int:
             ui.cancelled()
             return 0
 
-    return apply_plan(operations, args.timeout, no_commit=args.no_commit, auto_commit=args.yes, match_cache=match_cache)
+    return apply_plan(operations, args.timeout, no_commit=args.no_commit, auto_commit=args.yes, match_cache=match_cache, verify_cmd=args.verify)
 
 
 if __name__ == "__main__":

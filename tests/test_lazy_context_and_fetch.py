@@ -127,6 +127,33 @@ class TestLazyContextAndFetch(unittest.TestCase):
             self.assertIn("symbol 'nonexistent_fn' not located", body)
             self.assertIn("def foo(x, y):", body)
 
+    def test_detect_verification_command_custom_file(self):
+        from code_exec import detect_verification_command
+        verify_file = ROOT / ".code-exec-verify"
+        try:
+            verify_file.write_text("pytest -m unit", encoding="utf-8")
+            cmd = detect_verification_command()
+            self.assertEqual(cmd, "pytest -m unit")
+        finally:
+            if verify_file.exists():
+                verify_file.unlink()
+
+    def test_copy_verification_error_to_clipboard(self):
+        from code_exec import copy_verification_error_to_clipboard
+        with patch("code_exec.set_clipboard") as mock_set:
+            copy_verification_error_to_clipboard(
+                cmd="pytest",
+                returncode=1,
+                output="FAILED test_app.py::test_fail - AssertionError",
+                modified_files=["src/app.py"],
+            )
+            mock_set.assert_called_once()
+            clipboard_text = mock_set.call_args[0][0]
+            self.assertIn("verification hook failed", clipboard_text)
+            self.assertIn("`pytest` (exit code 1)", clipboard_text)
+            self.assertIn("`src/app.py`", clipboard_text)
+            self.assertIn("FAILED test_app.py::test_fail", clipboard_text)
+
     def test_handle_fetch_operations_full_file(self):
         rel_path = f"_test_scratch_fetch/sample.py"
         op = Operation("FETCH", (rel_path,))
