@@ -72,6 +72,61 @@ class TestLazyContextAndFetch(unittest.TestCase):
             self.assertIn("Bar.baz", body)
             self.assertNotIn("def foo(", body)
 
+    def test_handle_fetch_operations_react_functional_component(self):
+        op = Operation("FETCH", ("tests/fixtures/Component.jsx", "DashboardCard"))
+        with patch("code_exec.set_clipboard"):
+            body, count, lines, toks = handle_fetch_operations([op])
+            self.assertEqual(count, 1)
+            self.assertIn("export function DashboardCard(", body)
+            self.assertIn("DashboardCard", body)
+            self.assertIn("lines 7-46", body)
+            self.assertNotIn("export default DashboardCard;", body)
+
+    def test_handle_fetch_operations_js_arrow_and_class_components(self):
+        sample_js = self.scratch / "components.jsx"
+        sample_js.write_text(
+            "import React from 'react';\n\n"
+            "export const Button = ({ onClick, children }) => {\n"
+            "  return (\n"
+            "    <button onClick={onClick}>\n"
+            "      {children}\n"
+            "    </button>\n"
+            "  );\n"
+            "};\n\n"
+            "export class Header extends React.Component {\n"
+            "  render() {\n"
+            "    return <h1>Title</h1>;\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        rel_path = "_test_scratch_fetch/components.jsx"
+
+        # Arrow function component
+        op1 = Operation("FETCH", (rel_path, "Button"))
+        with patch("code_exec.set_clipboard"):
+            body1, count, lines, toks = handle_fetch_operations([op1])
+            self.assertEqual(count, 1)
+            self.assertIn("export const Button = ({ onClick, children }) => {", body1)
+            self.assertNotIn("class Header", body1)
+
+        # Class component
+        op2 = Operation("FETCH", (rel_path, "Header"))
+        with patch("code_exec.set_clipboard"):
+            body2, count, lines, toks = handle_fetch_operations([op2])
+            self.assertEqual(count, 1)
+            self.assertIn("export class Header extends React.Component {", body2)
+            self.assertNotIn("const Button", body2)
+
+    def test_handle_fetch_operations_symbol_not_found_fallback(self):
+        rel_path = f"_test_scratch_fetch/sample.py"
+        op = Operation("FETCH", (rel_path, "nonexistent_fn"))
+        with patch("code_exec.set_clipboard"):
+            body, count, lines, toks = handle_fetch_operations([op])
+            self.assertEqual(count, 1)
+            self.assertIn("symbol 'nonexistent_fn' not located", body)
+            self.assertIn("def foo(x, y):", body)
+
     def test_handle_fetch_operations_full_file(self):
         rel_path = f"_test_scratch_fetch/sample.py"
         op = Operation("FETCH", (rel_path,))
