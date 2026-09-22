@@ -289,6 +289,7 @@ class TerminalUI:
             "MOVE": c.CYAN, "COPY": c.CYAN, "RENAME": c.CYAN,
             "CHMOD": c.CYAN, "COMMIT": c.CYAN,
             "RUN": c.CORAL,
+            "FETCH": c.CYAN,
         }
         label = self._BADGE_LABELS.get(cmd, cmd)
         return c.paint(f" {label:<7} ", colors.get(cmd, c.SLATE), bold=True)
@@ -321,7 +322,9 @@ class TerminalUI:
             return f"{args[0]} {c.paint(args[1], c.WHITE)}", "", 0, 0
         if cmd == "COMMIT":
             return c.paint(f'"{args[0]}"', c.WHITE), "", 0, 0
-
+        if cmd == "FETCH":
+            range_info = f" {c.paint(f'lines {args[1]}', c.CYAN)}" if len(args) > 1 and args[1] else ""
+            return f"{args[0]}{range_info}", "", 0, 0
         if cmd == "CREATE":
             add = self._line_count(op.data)
         elif cmd in {"EDIT", "REPLACE_ALL"}:
@@ -422,6 +425,7 @@ class TerminalUI:
         row("EDIT", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
         row("PATCH", "path", c.AMBER, "<<< unified diff >>>", bold=True)
         row("REPLACE_ALL", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
+        row("FETCH", "path[:range]", c.CYAN, "(request file context to clipboard)", bold=True)
         row("DELETE", "path", c.RED, "(file or folder)", bold=True)
         row("MKDIR", "path", c.GREEN, "(create folder)", bold=True)
         row("CHMOD", "path mode", c.CYAN, "(+x, 755, 644)", bold=True)
@@ -446,6 +450,7 @@ class TerminalUI:
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
         row("--export-context", "Export clean context folder (alias: export-concet)", c.CYAN)
+        row("--compact", "Export skeleton/summarized context (token saver)", c.CYAN)
         row("--ignore-file <name>", "Specify custom ignore file (default: .code-exec-ignore)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
@@ -495,32 +500,65 @@ class TerminalUI:
     def interactive_menu(self, root: Path) -> str:
         c = self.palette
         self.header(root)
-        items = [
-            ("1", "Apply plan", "from clipboard", ""),
-            ("2", "Dry-run", "validate plan from clipboard", "--dry-run"),
-            ("3", "Copy AI prompt", "instructions to clipboard", "-p"),
-            ("4", "Quick guide", "syntax & CLI reference", "-h"),
-            ("5", "Check updates", "install latest from GitHub", "update"),
-            ("6", "Undo last plan", "revert file changes", "undo"),
-            ("7", "Commit prompt", "git diff prompt to clipboard", "-c"),
-            ("8", "Export context", "clean project folder (context)", "export-context"),
+
+        # 1. Onboarding Quick-Start Panel
+        repo_url = "https://github.com/antonino54/code_exec"
+        flow_lines = [
+            "",
+            f"  {c.paint('Step 1', c.CORAL, bold=True)}  {c.paint('Copy Instructions', c.WHITE, bold=True)}   Run {c.paint('code-exec -p', c.CYAN)} (menu 3) to copy instructions",
+            f"  {c.paint('Step 2', c.CORAL, bold=True)}  {c.paint('Export Context', c.WHITE, bold=True)}      Run {c.paint('code-exec export-context --compact', c.CYAN)} (menu 8)",
+            f"  {c.paint('Step 3', c.CORAL, bold=True)}  {c.paint('Send to Any AI', c.WHITE, bold=True)}      Attach context/ & instructions into chat; ask for changes",
+            f"  {c.paint('Step 4', c.CORAL, bold=True)}  {c.paint('Apply Safely', c.WHITE, bold=True)}        Copy AI reply, then run {c.paint('code-exec', c.GREEN, bold=True)} (menu 1)",
+            "",
+            self._divider("Online Guide"),
+            f"  {c.paint('Web Docs:', c.SLATE)}  {c.paint(f'{repo_url}#readme', c.CYAN, bold=True)}  (Run {c.paint('code-exec docs', c.WHITE)})",
+            "",
         ]
-        lines = [""]
-        for key, label, desc, flag in items:
-            key_s = c.paint(key, c.CORAL, bold=True)
-            label_s = c.paint(f"{label:<16}", c.WHITE, bold=True)
-            desc_s = c.paint(f"{desc:<30}", c.SLATE)
-            flag_s = c.paint(flag, c.CYAN) if flag else ""
-            lines.append(self._line(f"{key_s}  {label_s}{desc_s}  {flag_s}".rstrip()))
+        self.render_panel(title=self._title("How it works", "info"), lines=flow_lines)
+        print()
+
+        # 2. Categorized Menu Options
+        lines = [self._divider("Apply & Validate")]
+        row_fmt = lambda key, label, desc, flag: f"  {c.paint(key, c.CORAL, bold=True)}  {c.paint(f'{label:<17}', c.WHITE, bold=True)}{c.paint(f'{desc:<28}', c.SLATE)}  {c.paint(flag, c.CYAN)}"
+
+        lines.append(row_fmt("1", "Apply plan", "read clipboard & execute", "apply"))
+        lines.append(row_fmt("2", "Dry-run", "simulate without writing", "--dry-run"))
+        lines.append(row_fmt("6", "Undo changes", "revert last applied plan", "undo"))
+
+        lines.append(self._divider("Context & AI Helpers"))
+        lines.append(row_fmt("3", "Copy prompt", "system prompt to clipboard", "-p"))
+        lines.append(row_fmt("8", "Export context", "clean project tree for AI", "export-context"))
+        lines.append(row_fmt("7", "Commit prompt", "stage diff prompt for AI", "-c"))
+
+        lines.append(self._divider("Documentation & Setup"))
+        lines.append(row_fmt("4", "Quick guide", "terminal syntax & CLI cheat-sheet", "-h"))
+        lines.append(row_fmt("d", "Online docs", "open GitHub guide in browser", "docs"))
+        lines.append(row_fmt("5", "Check updates", "pull latest from GitHub", "update"))
         lines.append(self._line(f"{c.paint('q', c.SLATE, bold=True)}  {c.paint('Exit', c.SLATE)}"))
         lines.append("")
-        self.render_panel(title=self._title("Menu", "brand"), lines=lines)
+
+        self.render_panel(title=self._title("Actions", "brand"), lines=lines)
         print()
         try:
-            return self.prompt_choice("Choose an option [1-8/q]", default="q").lower()
+            return self.prompt_choice("Choose an option [1-8/d/q]", default="q").lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return "q"
+
+    def open_web_guide(self) -> None:
+        import webbrowser
+        c = self.palette
+        url = "https://github.com/antonino54/code_exec#readme"
+        lines = [
+            self._line("Opening online documentation & guide in your browser...", c.WHITE, bold=True),
+            self._kv("URL", c.paint(url, c.CYAN, bold=True)),
+            self._tip("Star or bookmark the repository for updates and examples."),
+        ]
+        self._card("GitHub Guide", "info", lines)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Apply flow
@@ -547,9 +585,8 @@ class TerminalUI:
         for op in operations:
             cmd = op.command
             args = op.args
-            if cmd in {"RUN", "COMMIT"} or not args:
+            if cmd in {"RUN", "COMMIT", "FETCH"} or not args:
                 continue
-
             if cmd in {"MOVE", "COPY", "RENAME"}:
                 src = str(args[0])
                 dst = str(args[1])
@@ -852,13 +889,17 @@ class TerminalUI:
             self._tip("Paste (⌘V / Ctrl+V) into your AI chat to generate plan blocks."),
         ])
 
-    def commit_prompt_copied(self, prompt_len: int) -> None:
+    def commit_prompt_copied(self, prompt_len: int, file_path: Path | None = None) -> None:
         c = self.palette
-        self._card("Commit prompt copied", "ok", [
+        tip_text = "Diff is large! File copied to clipboard: paste (Cmd+V/Ctrl+V) directly into chat to attach." if file_path else "Paste (Cmd+V / Ctrl+V) into your AI chat to generate a COMMIT plan."
+        lines = [
             self._line("Git diff prompt copied to your clipboard.", c.WHITE, bold=True),
-            self._kv("Size", c.paint(f"{prompt_len} characters", c.WHITE)),
-            self._tip("Paste (⌘V / Ctrl+V) into your AI chat to generate a COMMIT plan."),
-        ])
+            self._kv("Size", c.paint(f"{prompt_len:,} characters", c.WHITE)),
+            self._tip(tip_text),
+        ]
+        if file_path:
+            lines.append(self._kv("File", c.paint(str(file_path), c.CYAN, bold=True)))
+        self._card("Commit prompt copied", "ok", lines)
 
     def prompt_commit(self, default_msg: str) -> bool:
         c = self.palette
@@ -880,17 +921,34 @@ class TerminalUI:
         c = self.palette
         self._card("Commit skipped", "warn", [self._line(error, c.AMBER)])
 
-    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0) -> None:
+    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0, compact: bool = False) -> None:
         c = self.palette
         token_str = f"~{tokens:,} tokens ({size_kb} KB)"
+        mode_str = "compact skeleton (token saver)" if compact else "full context"
         lines = [
             f"  {c.paint('Location:', c.SLATE):<18} {c.paint(location, c.CYAN, bold=True)}",
+            f"  {c.paint('Mode:', c.SLATE):<18} {c.paint(mode_str, c.CYAN)}",
             f"  {c.paint('Files included:', c.SLATE):<18} {c.paint(str(included), c.GREEN, bold=True)}",
             f"  {c.paint('Est. Tokens:', c.SLATE):<18} {c.paint(token_str, c.AMBER, bold=True)}",
             f"  {c.paint('Files ignored:', c.SLATE):<18} {c.paint(str(ignored), c.SLATE)}",
             f"  {c.paint('Ignore file:', c.SLATE):<18} {c.paint(ignore_file, c.WHITE)}",
         ]
         self._card("Clean Context Exported", "ok", lines)
+
+    def fetch_success(self, file_count: int, total_lines: int, tokens: int = 0) -> None:
+        c = self.palette
+        token_str = f"~{tokens:,} tokens"
+        noun = "file" if file_count == 1 else "files"
+        is_large = tokens > 18000
+        tip_text = "File copied to clipboard! Paste (Cmd+V/Ctrl+V) directly into chat to attach." if is_large else "Requested file content copied to clipboard. Paste into your AI chat."
+        lines = [
+            self._line(f"Loaded {file_count} requested {noun} ({total_lines} lines).", c.WHITE, bold=True),
+            self._kv("Est. Tokens", c.paint(token_str, c.AMBER, bold=True)),
+            self._tip(tip_text),
+        ]
+        if is_large:
+            lines.append(self._kv("File", c.paint("context/FETCHED_CONTEXT.md", c.CYAN, bold=True)))
+        self._card("Context Fetched", "ok", lines)
 
     # ------------------------------------------------------------------ #
     # Warnings, errors & recovery

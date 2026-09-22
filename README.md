@@ -159,6 +159,7 @@ The AI can analyze and explain its reasoning in plain text outside the code bloc
 | `PREPEND` | `PREPEND path <<< content >>>` | Prepends content to the start of a file. |
 | `INSERT_BEFORE` | `INSERT_BEFORE path MARKER <<<...>>> CONTENT <<<...>>>` | Inserts content immediately before an anchor. |
 | `INSERT_AFTER` | `INSERT_AFTER path MARKER <<<...>>> CONTENT <<<...>>>` | Inserts content immediately after an anchor. |
+| `FETCH` | `FETCH path[:start-end]` | Loads requested file or line range to clipboard for lazy context. |
 | `RUN` | `RUN shell command` | Runs a whitelisted or user-approved sandboxed command. |
 | `COMMIT` | `COMMIT message` | Scoped commit staging only modified files. |
 

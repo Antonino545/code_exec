@@ -28,6 +28,10 @@ COMMAND_ALIASES = {
     "RUN_COMMAND": "RUN",
     "EXEC": "RUN",
     "EXECUTE": "RUN",
+    "READ": "FETCH",
+    "READ_FILE": "FETCH",
+    "FETCH_FILE": "FETCH",
+    "GET": "FETCH",
 }
 
 # --------------------------------------------------------------------------- #
@@ -173,16 +177,60 @@ def set_clipboard(text: str) -> None:
         ]]
     else:
         commands = []
-
     for command in commands:
         try:
             subprocess.run(command, input=text.encode("utf-8"), check=True, timeout=10)
             return
         except (OSError, subprocess.SubprocessError):
             continue
-
     tried = ", ".join(c[0] for c in commands) or "no clipboard tool for this platform"
     raise RuntimeError(f"Could not copy to clipboard (tried: {tried}).")
+
+
+def set_clipboard_file(path: Path) -> bool:
+    """Places the actual file object into the clipboard so it can be pasted as an attached file."""
+    abs_path = path.resolve()
+    if not abs_path.is_file():
+        return False
+
+    if sys.platform == "darwin":
+        # AppleScript sets the NSPasteboard file promise / POSIX file
+        script = f'tell app "Finder" to set the clipboard to (POSIX file "{abs_path.as_posix()}")'
+        try:
+            res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+            if res.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    elif sys.platform.startswith("linux"):
+        # Set text/uri-list so file managers and browsers accept it as an attached file
+        uri = abs_path.as_uri() + "\r\n"
+        tools = [
+            ["wl-copy", "--type", "text/uri-list"],
+            ["xclip", "-selection", "clipboard", "-t", "text/uri-list"],
+        ]
+        for cmd in tools:
+            try:
+                subprocess.run(cmd, input=uri.encode("utf-8"), check=True, timeout=5)
+                return True
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+    elif sys.platform == "win32":
+        # PowerShell Set-Clipboard -Path puts native HDROP file list on clipboard
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            f'Set-Clipboard -Path "{str(abs_path)}"',
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=5)
+            if res.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -726,7 +774,23 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         if len(parts) != 2:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
         return Operation("CHMOD", (_path(parts[0]), parts[1].strip())), i
-
+    if command == "FETCH":
+        parts = rest.split(None, 1)
+        if len(parts) == 2 and re.match(r"^\d+(?:-\d+)?$", parts[1].strip()):
+            p_arg = _path(parts[0].rstrip(":"))
+            r_arg = parts[1].strip()
+        elif ":" in parts[0]:
+            p_cand, r_cand = parts[0].rsplit(":", 1)
+            if re.match(r"^\d+(?:-\d+)?$", r_cand):
+                p_arg = _path(p_cand)
+                r_arg = r_cand
+            else:
+                p_arg = _path(parts[0].rstrip(":"))
+                r_arg = ""
+        else:
+            p_arg = _path(rest.rstrip(":"))
+            r_arg = ""
+        return Operation("FETCH", (p_arg, r_arg) if r_arg else (p_arg,)), i
     if command in {"DELETE", "MKDIR", "TOUCH"}:
         return Operation(command, (_path(rest.rstrip(":")),)), i
 
