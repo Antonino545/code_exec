@@ -389,7 +389,8 @@ def create_plan_folder(
         root = Path.cwd().resolve()
     target_dir = root / output_dirname
 
-    # Automatically ensure the context folder is ignored in git
+    # Automatically ensure both .code_exec/ and the context folder are ignored in git
+    ensure_gitignore_entry(root, ".code_exec")
     ensure_gitignore_entry(root, output_dirname)
 
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)

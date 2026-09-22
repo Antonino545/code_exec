@@ -667,7 +667,7 @@ def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def generate_commit_prompt() -> tuple[str, Path | None]:
+def generate_commit_prompt() -> tuple[str, int, Path | None]:
     """Collects git diff and untracked files into an AI prompt, saving to file if too large."""
     from code_exec_plan_export import estimate_tokens
 
@@ -717,7 +717,7 @@ def generate_commit_prompt() -> tuple[str, Path | None]:
     else:
         set_clipboard(prompt_body)
 
-    return prompt_body, dump_file
+    return prompt_body, tokens, dump_file
 
 
 def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
@@ -910,6 +910,13 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
+
+    # Ensure .code_exec/ is always ignored by git in the active repository
+    try:
+        from code_exec_plan_export import ensure_gitignore_entry
+        ensure_gitignore_entry(ROOT, ".code_exec")
+    except Exception:
+        pass
 
     parser = argparse.ArgumentParser(description="Deterministic local code executor", add_help=False)
     parser.add_argument("action", nargs="?", default=None,
@@ -1111,10 +1118,10 @@ def main(argv=None) -> int:
 
     if args.commit_prompt:
         try:
-            prompt_body, dump_file = generate_commit_prompt()
+            prompt_body, tokens, dump_file = generate_commit_prompt()
         except Exception as exc:
             return fail(f"Could not generate commit prompt: {exc}")
-        ui.commit_prompt_copied(len(prompt_body), file_path=dump_file)
+        ui.commit_prompt_copied(len(prompt_body), tokens=tokens, file_path=dump_file)
         return 0
 
     if args.prompt:

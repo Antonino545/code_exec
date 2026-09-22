@@ -105,6 +105,7 @@ class TestLazyContextAndFetch(unittest.TestCase):
         )
         content = gitignore.read_text(encoding="utf-8")
         self.assertIn("context/", content)
+        self.assertIn(".code_exec/", content)
 
     def test_cli_fetch_action(self):
         rel_path = f"_test_scratch_fetch/sample.py:2-4"
