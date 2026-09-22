@@ -101,6 +101,14 @@ from code_exec_fs import (
 )
 
 
+
+# ============================================================
+# Session-level error history — tracks (file, error_code) → failure count
+# so repeated failures on the same file trigger full file attachment.
+# ============================================================
+_error_history: dict[tuple[str, str], int] = {}
+
+
 # ============================================================
 # Operation execution
 # ============================================================
@@ -631,6 +639,48 @@ def copy_error_to_clipboard(error_msg: str) -> None:
     candidate_diff = _extract_candidate_diff(clean_err)
 
     op_section = f"\n{op_context}\n" if op_context else ""
+
+    # ---- Repeated-error detection: inject the full file on the 2nd+ failure ----
+    file_section = ""
+    affected_file: str | None = None
+    attempt = 1
+
+    # Extract the target filename and error code to key the history
+    err_code_m = re.search(r"ERR\|(\w+)\|([^\s|]+)", clean_err)
+    if err_code_m:
+        err_code = err_code_m.group(1)
+        raw_path = err_code_m.group(2)
+        # Normalise: strip leading path fragments that look like operation labels
+        candidate = raw_path.split(":")[0].strip()
+        if candidate and not candidate.startswith("matched") and not candidate.startswith("line"):
+            affected_file = candidate
+            key = (affected_file, err_code)
+            _error_history[key] = _error_history.get(key, 0) + 1
+            attempt = _error_history[key]
+
+    if affected_file and attempt >= 2:
+        # Read the file and attach it so the LLM can't hallucinate SEARCH content
+        try:
+            file_path = ROOT / affected_file
+            if file_path.is_file():
+                raw = file_path.read_text(encoding="utf-8", errors="replace")
+                line_count = raw.count("\n") + 1
+                size_kb = round(len(raw.encode()) / 1024, 1)
+                file_section = (
+                    f"\n\n---\n"
+                    f"### ⚠️ Repeated failure (attempt {attempt}) — full file attached\n\n"
+                    f"The SEARCH block in `{affected_file}` has now failed **{attempt} times**. "
+                    f"The complete current content of that file is shown below "
+                    f"({line_count} lines, {size_kb} KB) so you can read the exact lines "
+                    f"before writing any SEARCH block. Do **not** write from memory.\n\n"
+                    f"```\n{raw}\n```\n"
+                    f"\n> **Do NOT copy lines from the snippet above into a SEARCH block by retyping "
+                    f"them.** Select and paste the verbatim lines exactly as they appear.\n"
+                )
+                ui.repeated_error_file_attached(affected_file, attempt, line_count, size_kb)
+        except Exception:
+            pass
+
     prompt = (
         "The previous `code_exec` plan failed with the following error:\n\n"
         f"{fence}\n{clean_err}\n{fence}\n"
@@ -642,6 +692,7 @@ def copy_error_to_clipboard(error_msg: str) -> None:
         "- Fix **only** the failing operation. Do not re-emit operations that already succeeded.\n"
         "- You may explain your analysis outside the code block.\n"
         f"- Then output a single revised {fence}code_exec ...{fence} block that corrects the issue."
+        f"{file_section}"
     )
     try:
         set_clipboard(prompt)

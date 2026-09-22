@@ -233,6 +233,107 @@ class TestClipboardRetryPrompt(unittest.TestCase):
 
 
 # ============================================================
+# 3b. Repeated-error file injection
+# ============================================================
+class TestRepeatedErrorFileInjection(unittest.TestCase):
+    """When the same (file, error_code) fails twice, full file content is injected into clipboard."""
+
+    def setUp(self):
+        import code_exec
+        code_exec._error_history.clear()
+
+    def tearDown(self):
+        import code_exec
+        code_exec._error_history.clear()
+
+    def test_first_failure_does_not_attach_file(self):
+        """On the 1st failure the clipboard prompt should NOT contain the file content section."""
+        from code_exec import copy_error_to_clipboard
+        with patch("code_exec.set_clipboard") as mock_set:
+            copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec.py (first line: 'import re')")
+        prompt = mock_set.call_args[0][0]
+        self.assertNotIn("Repeated failure", prompt)
+        self.assertNotIn("full file content", prompt.lower())
+
+    def test_second_failure_attaches_file_content(self):
+        """On the 2nd failure for the same file+error the full file content is appended."""
+        from code_exec import copy_error_to_clipboard
+        # First call — sets count to 1
+        with patch("code_exec.set_clipboard"):
+            copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec.py (first line: 'import re')")
+        # Second call — count becomes 2, triggers injection
+        with patch("code_exec.set_clipboard") as mock_set:
+            with patch("code_exec_ui.ui.repeated_error_file_attached") as mock_ui:
+                copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec.py (first line: 'import re')")
+        prompt = mock_set.call_args[0][0]
+        # Must contain the file attachment section
+        self.assertIn("Repeated failure", prompt)
+        self.assertIn("2 times", prompt)
+        # Must contain actual file content (code_exec.py starts with #!/usr/bin/env python3)
+        self.assertIn("#!/usr/bin/env python3", prompt)
+        # UI card must be called
+        mock_ui.assert_called_once()
+        call_args = mock_ui.call_args[0]
+        self.assertEqual(call_args[0], "code_exec.py")
+        self.assertEqual(call_args[1], 2)
+
+    def test_third_failure_shows_correct_attempt_count(self):
+        """3rd failure shows '3 times' in the prompt."""
+        from code_exec import copy_error_to_clipboard
+        error = "ERR|SEARCH_NOT_FOUND|code_exec.py (first line: 'import os')"
+        for _ in range(2):
+            with patch("code_exec.set_clipboard"):
+                with patch("code_exec_ui.ui.repeated_error_file_attached"):
+                    copy_error_to_clipboard(error)
+        with patch("code_exec.set_clipboard") as mock_set:
+            with patch("code_exec_ui.ui.repeated_error_file_attached"):
+                copy_error_to_clipboard(error)
+        prompt = mock_set.call_args[0][0]
+        self.assertIn("3 times", prompt)
+
+    def test_different_error_code_on_same_file_is_independent(self):
+        """SEARCH_NOT_FOUND and FILE_NOT_FOUND on the same file are tracked separately."""
+        from code_exec import copy_error_to_clipboard
+        # Fail twice with SEARCH_NOT_FOUND
+        for _ in range(2):
+            with patch("code_exec.set_clipboard"):
+                with patch("code_exec_ui.ui.repeated_error_file_attached"):
+                    copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec.py (x)")
+        # First failure with FILE_NOT_FOUND — should NOT trigger attachment
+        with patch("code_exec.set_clipboard") as mock_set:
+            copy_error_to_clipboard("ERR|FILE_NOT_FOUND|code_exec.py")
+        prompt = mock_set.call_args[0][0]
+        # FILE_NOT_FOUND count is only 1, so no attachment
+        self.assertNotIn("Repeated failure", prompt)
+
+    def test_different_files_tracked_independently(self):
+        """Failures on different files don't cross-contaminate the counter."""
+        from code_exec import copy_error_to_clipboard
+        # Fail once on code_exec.py
+        with patch("code_exec.set_clipboard"):
+            copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec.py (x)")
+        # Fail once on a different file — should NOT trigger attachment
+        with patch("code_exec.set_clipboard") as mock_set:
+            copy_error_to_clipboard("ERR|SEARCH_NOT_FOUND|code_exec_ui.py (x)")
+        prompt = mock_set.call_args[0][0]
+        self.assertNotIn("Repeated failure", prompt)
+
+    def test_nonexistent_file_does_not_crash(self):
+        """If the referenced file doesn't exist, the injection is silently skipped."""
+        from code_exec import copy_error_to_clipboard
+        error = "ERR|SEARCH_NOT_FOUND|totally_nonexistent_xyz_file.py (x)"
+        for _ in range(2):
+            with patch("code_exec.set_clipboard"):
+                copy_error_to_clipboard(error)
+        # On 2nd call: file doesn't exist, but no exception should propagate
+        with patch("code_exec.set_clipboard") as mock_set:
+            copy_error_to_clipboard(error)
+        prompt = mock_set.call_args[0][0]
+        # No file section injected since file doesn't exist
+        self.assertNotIn("full file attached", prompt.lower())
+
+
+# ============================================================
 # 4. Smart path prefix recovery (src/, app/, lib/ stripping)
 # ============================================================
 class TestSmartPathPrefixRecovery(Base):
