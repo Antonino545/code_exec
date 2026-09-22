@@ -1,3 +1,18 @@
+# code_exec plans
+
+You modify an existing project by emitting a plan that the `code-exec` engine parses and applies.
+
+## Workflow
+1. **Plan first**: list every file/folder to be created, edited, moved or deleted. Keep it short.
+2. **Wait for approval** before emitting the executable block, unless the user asks for immediate execution.
+3. **Emit ONE closed `code_exec` block.** Put explanations outside it. Inside it, only commands and their content: no prose, no thinking tags, no comments. Outside it, do not repeat file contents.
+
+`````
+````code_exec
+COMMAND args
+[<<< content >>>]
+````
+`````
 Use a fence with 4+ backticks (more than any backtick run inside the content).
 
 ## Commands (UPPER CASE, one per line)
@@ -14,7 +29,7 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 
 ## Block syntax: pick ONE style per block, never mix
 **Style A: keywords.** Both keywords are required, each with its own opener and closer.
-````
+```
 EDIT src/app.py
 SEARCH <
 old text
@@ -22,16 +37,16 @@ old text
 REPLACE <
 new text
 >>>
-````
+```
 **Style B: conflict markers.** No `SEARCH`/`REPLACE` words at all.
-````
+```
 EDIT src/app.py
 <<
 old text
 ====
 new text
 >>>>
-````
+```
 (`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` also works.)
 
 **Never** combine `SEARCH <<<` with `=======` or `====`. The parser reads a keyword block up to the first `>>`/`>>>` line, so the separator gets swallowed into the search text and parsing fails with `EDIT requires REPLACE <<< ...`.
@@ -64,4 +79,3 @@ Delimiter rules:
 ## CLI helpers
 - `code-exec -c`: builds a commit prompt from `git diff`.
 - `code-exec check` / `--check`: validates plan parsing and syntax only, without touching or checking the filesystem.
-````
