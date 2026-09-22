@@ -88,11 +88,11 @@ def take_warnings() -> list[str]:
 #
 # 2. Conflict-marker style (git / aider), no SEARCH/REPLACE keywords
 #        EDIT path
-#        <<<<   (or <<<<<<< SEARCH)
+#        <<     (2-5 `<`, or <<<<<<< SEARCH)
 #        old text
-#        ====   (or =======)
+#        ==     (2-5 `=`)
 #        new text
-#        >>>>   (or >>>>>>> REPLACE)
+#        >>     (2-5 `>`, or >>>>>>> REPLACE)
 #
 # Either style can be repeated under one command to express several edits.
 # --------------------------------------------------------------------------- #
@@ -100,16 +100,21 @@ _OPEN_LINE = re.compile(r"^<{1,5}$")          # opener on its own line
 _OPEN_SUFFIX = re.compile(r"^(.*?)\s*<{1,5}$")  # opener at the end of a command line
 _NEST_OPEN = re.compile(r"^<{3,5}$")          # nested block inside content
 _CLOSE_STRICT = re.compile(r"^>{2,5}$")
-_DIFF_OPEN = re.compile(r"^(?:(?:SEARCH|MARKER)\s*:?\s*)?<{3,}\s*(?:SEARCH|ORIGINAL|OLD|MARKER)?\s*:?\s*$", re.IGNORECASE)
-_DIFF_SEP = re.compile(r"^={3,}\s*$")
-_DIFF_CLOSE = re.compile(r"^>{3,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", re.IGNORECASE)
+_DIFF_OPEN = re.compile(r"^(?:(?:SEARCH|MARKER)\s*:?\s*)?<{2,}\s*(?:SEARCH|ORIGINAL|OLD|MARKER)?\s*:?\s*$", re.IGNORECASE)
+_DIFF_SEP = re.compile(r"^={2,}\s*$")
+_DIFF_CLOSE = re.compile(r"^>{2,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", re.IGNORECASE)
 _ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
 
 _PAIR_COMMANDS = {"EDIT", "REPLACE_ALL", "INSERT_BEFORE", "INSERT_AFTER"}
-_BLOCK_KEYWORDS = {"SEARCH", "REPLACE", "MARKER", "CONTENT", "THINK", "END_THINK", "END_OF_FILE"}
+_BLOCK_KEYWORDS = {"SEARCH", "REPLACE", "MARKER", "CONTENT", "END_OF_FILE"}
 _SHELL_WORDS = {
     "npm", "npx", "pnpm", "yarn", "pytest", "python", "python3", "pip", "pip3", "uv", "cargo", "go",
     "ruff", "black", "git", "node", "make", "bash", "sh", "cd", "ls", "cat", "echo",
+}
+_PROSE_STOPWORDS = {
+    "the", "a", "an", "this", "that", "these", "those", "after", "before", "manually",
+    "please", "now", "should", "would", "will", "then", "once", "when", "and", "with",
+    "to", "for", "of", "in", "on", "it", "we", "you", "i", "so", "still", "also",
 }
 _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
 _THINK_TAG = re.compile(r"(?ims)^[ \t]*<(think(?:ing)?)>.*?</\1>[ \t]*\n?")
@@ -254,6 +259,10 @@ def _norm_path(raw: str) -> str:
         p = p.replace("\\", "/")
     while p.startswith("./"):
         p = p[2:]
+    if p.startswith("~/"):
+        # Home-relative paths are never valid in a project plan
+        _warn(f"home-relative path rejected (will fail as INVALID_PATH): {p}")
+        return p
     if p.startswith("/"):
         try:
             rel = Path(p).resolve().relative_to(Path.cwd().resolve())
@@ -261,6 +270,18 @@ def _norm_path(raw: str) -> str:
             return p  # leave it: the executor rejects it as INVALID_PATH
         _warn(f"absolute path made project-relative: {rel.as_posix()}")
         return rel.as_posix()
+
+    # Smart prefix recovery: if the path doesn't exist, try stripping a leading
+    # `src/`, `app/`, `lib/`, or `packages/` segment (common LLM hallucination).
+    from code_exec_types import ROOT as _ROOT
+    if not (_ROOT / p).exists():
+        parts = p.split("/", 1)
+        if len(parts) == 2 and parts[0] in {"src", "app", "lib", "packages", "source"}:
+            candidate = parts[1]
+            if (_ROOT / candidate).exists():
+                _warn(f"path prefix '{parts[0]}/' stripped (file found at '{candidate}')")
+                return candidate
+
     return p
 
 
@@ -295,15 +316,21 @@ def _is_prose(line: str) -> bool:
         return False
     if up in COMMANDS or up in COMMAND_ALIASES:
         # "Create a new file called foo" is a sentence; "Create src/a.py <<<" is a command.
-        sentence = (
-            tok.istitle()
-            and len(s.split()) >= 4
-            and "/" not in s
-            and "\\" not in s
-            and "->" not in s
-            and not s.endswith("<")
-        )
-        return sentence
+        words = s.split()
+        pathlike = "/" in s or "\\" in s or "->" in s or s.endswith("<")
+        if pathlike or len(words) < 4:
+            return False
+        if tok.istitle():
+            return True
+        if tok.islower():
+            # A lowercase command word leading free text is genuinely ambiguous: RUN and
+            # COMMIT accept arbitrary text and always "succeed" to parse, so a stray
+            # sentence like "run the tests manually after this lands" would otherwise
+            # become a real (and possibly executed) operation. Only call it prose when it
+            # also reads like English, not a shell command.
+            rest_words = {w.strip(".,:;!?").lower() for w in words[1:]}
+            return bool(rest_words & _PROSE_STOPWORDS)
+        return False
     if difflib.get_close_matches(up, sorted(COMMANDS), n=1, cutoff=0.8):
         return False  # probably a typo of a command
     return True
@@ -338,11 +365,6 @@ def _find_plan_start(lines: list[str]) -> int | None:
             continue
         if first is None:
             first = idx
-        if s.split()[0] == "THINK":
-            rest = [ln.strip() for ln in lines[idx:]]
-            if idx == first and "END_THINK" in rest and any(_is_strict_command(ln) for ln in rest):
-                return idx
-            continue
         if _is_strict_command(s):
             # A plan must start the reply; after leading prose it must also parse cleanly,
             # so a sentence like "RUN the tests now" can never be mistaken for a plan.
@@ -427,9 +449,16 @@ def extract_plan(text: str) -> str:
                     if close_match:
                         c_chars = close_match.group(1)
                         if c_chars[0] == fence_char and len(c_chars) >= fence_len:
-                            found_end = True
-                            i += 1
-                            break
+                            # For a code_exec block, only honor this as the real closer if
+                            # the plan collected so far is actually complete. A CREATE/EDIT
+                            # may be writing a file (e.g. a README) that itself contains a
+                            # nested ```/~~~ example; without this check that inner fence
+                            # would close the outer block early and silently truncate
+                            # everything after it.
+                            if not is_code_exec or _parses_cleanly("\n".join(block_lines)):
+                                found_end = True
+                                i += 1
+                                break
 
                 if is_code_exec:
                     block_lines.append(curr)
@@ -527,6 +556,14 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
     while k < len(lines) and lines[k].strip() != "END_OF_FILE":
         k += 1
     if k >= len(lines):
+        # Missing END_OF_FILE: tolerate it if no further command follows (last block in plan)
+        has_later_cmd = any(_is_strict_command(ln) for ln in lines[i:])
+        if not has_later_cmd:
+            _warn(
+                f"Missing END_OF_FILE for block starting at line {i + 1}; "
+                "treating end of plan as implicit closer"
+            )
+            return "\n".join(lines[i:]), len(lines)
         raise ValueError(f"Missing END_OF_FILE for block starting at line {i + 1}")
     return "\n".join(lines[i:k]), k + 1
 
@@ -664,11 +701,22 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     if not rest:
         raise ValueError(f"{command} requires an argument")
 
+    if command not in {"RUN", "COMMIT"}:
+        # Strip a trailing inline `# comment` some models add after a path/argument.
+        # RUN/COMMIT are exempt since their whole argument is free text (a shell
+        # command or commit message) that may legitimately contain '#'.
+        m_comment = re.search(r"\s+#.*$", rest)
+        if m_comment and m_comment.start() > 0:
+            trimmed = rest[: m_comment.start()].rstrip()
+            if trimmed:
+                _warn(f"line {i}: ignored trailing comment on a {command} line")
+                rest = trimmed
+
     if command in {"RUN", "COMMIT"}:
         return Operation(command, (_unwrap(rest),)), i
 
     if command in {"MOVE", "COPY", "RENAME"}:
-        pair = _ARROW.match(rest)
+        pair = _ARROW.match(rest) or re.match(r"^(\S.*?)\s+to\s+(\S.*)$", rest, re.IGNORECASE)
         if not pair:
             raise ValueError(f"{command} requires 'source -> destination'")
         return Operation(command, (_path(pair[1]), _path(pair[2]))), i
@@ -713,22 +761,20 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             i += 1
             continue
 
-        if line == "THINK":
-            i += 1
-            while i < len(lines) and lines[i].strip() != "END_THINK":
-                i += 1
-            if i >= len(lines):
-                raise ValueError(f"line {i + 1}: THINK block missing END_THINK")
-            i += 1
-            continue
-
         lineno = i + 1
 
-        # Commentary before the first command is skipped (and reported).
-        if not operations and _is_prose(line):
-            leading_skipped += 1
-            i += 1
-            continue
+        # Commentary before the first command, or after the last one, is skipped (and
+        # reported) instead of being misread as a command. Checked proactively (not just
+        # on a parse failure below) because RUN/COMMIT take free text and always succeed
+        # to parse, so a stray trailing sentence would otherwise become a real operation.
+        if _is_prose(line):
+            if not operations:
+                leading_skipped += 1
+                i += 1
+                continue
+            if not _has_later_command(lines, i + 1):
+                warn(f"ignored trailing text after the plan (from line {lineno})")
+                break
 
         # If a bare SEARCH/MARKER block appears after an EDIT/INSERT operation,
         # attach it to the preceding operation instead of failing as an unknown command.

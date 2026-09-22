@@ -29,15 +29,22 @@ class Base(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class PlanExtraction(Base):
     def test_fenced_plan_with_prose_around(self):
-        # With and without a legacy THINK block; text before and after the fence is ignored.
-        for label, body in (
-            ("with THINK", "THINK\nCreate sample file\nEND_THINK\nCREATE sample.txt\n<<<\nhello world\n>>>\n"),
-            ("without THINK", "CREATE sample.txt\n<<<\nhello world\n>>>\n"),
-        ):
-            with self.subTest(label):
-                r = ops(f"Paragraph before.\n\nMore text.\n\n```code_exec\n{body}```\n\nLet me know!")
-                self.assertEqual(len(r), 1)
-                self.assertEqual((r[0].command, r[0].args[0], r[0].data), ("CREATE", "sample.txt", "hello world"))
+        # Text before and after the fence is ignored.
+        body = "CREATE sample.txt\n<<<\nhello world\n>>>\n"
+        r = ops(f"Paragraph before.\n\nMore text.\n\n```code_exec\n{body}```\n\nLet me know!")
+        self.assertEqual(len(r), 1)
+        self.assertEqual((r[0].command, r[0].args[0], r[0].data), ("CREATE", "sample.txt", "hello world"))
+
+    def test_nested_fence_in_file_content_is_preserved(self):
+        # A CREATE/EDIT may write a file (e.g. a README) whose own content has a nested
+        # ```/~~~ fence; that must not close the outer code_exec block early.
+        r = ops(
+            "```code_exec\nCREATE docs/README.md <<<\n```bash\nnpm install\n```\n\n"
+            "More text after the nested fence.\n>>>\n```"
+        )
+        self.assertEqual(len(r), 1)
+        self.assertIn("```bash", r[0].data)
+        self.assertIn("More text after the nested fence.", r[0].data)
 
     def test_fence_variants(self):
         for info in ("code_exec", "code-exec", "CODE EXEC", "code_exec plan"):
@@ -80,15 +87,14 @@ class PlanExtraction(Base):
         r = ops("CREATE raw.txt\n<<<\nraw content\n>>>\n")
         self.assertEqual((r[0].command, r[0].args[0]), ("CREATE", "raw.txt"))
 
-    def test_legacy_think_plan_bare_and_in_plain_fence(self):
-        raw = "THINK\nDirect legacy plan\nEND_THINK\nCREATE legacy.txt\n<<<\nlegacy content\n>>>\n"
-        for label, text in (("bare", raw), ("plain fence", f"```text\n{raw}```")):
-            with self.subTest(label):
-                self.assertEqual(ops(text)[0].args[0], "legacy.txt")
-
-    def test_inline_opener_after_think_block(self):
-        r = ops("THINK\nTest inline <<<\nEND_THINK\nCREATE inline.txt <<<\ninline content\n>>>\n")
-        self.assertEqual((r[0].args[0], r[0].data), ("inline.txt", "inline content"))
+    def test_think_keyword_is_no_longer_special(self):
+        # THINK/END_THINK used to be a dedicated free-text block; the feature was removed
+        # as unused. A leftover literal THINK line is now just ordinary text: tolerated
+        # only as plain leading junk before a real plan (like any other stray sentence),
+        # not as an envelope that can hide arbitrarily-shaped content.
+        r = ops("THINK\nplanning this out\nEND_THINK\nDELETE a.py\n")
+        self.assertEqual([o.command for o in r], ["DELETE"])
+        self.assertTrue(any("before the plan" in w for w in p.take_warnings()))
 
     def test_edit_in_generic_fence_fallback(self):
         r = ops("Here is the edit:\n\n```diff\nEDIT src/utils.py\n<<<<\ntimeout = 10\n====\ntimeout = 30\n>>>>\n```\n")
@@ -262,6 +268,33 @@ class Normalisation(Base):
         r = ops("```code_exec\nupdate a.py\n<<<<\na\n====\nb\n>>>>\nmv a.py -> b.py\n```")
         self.assertEqual([o.command for o in r], ["EDIT", "MOVE"])
 
+    def test_move_copy_rename_accept_to(self):
+        r = ops("MOVE old.txt to new.txt")
+        self.assertEqual((r[0].command, r[0].args), ("MOVE", ("old.txt", "new.txt")))
+
+    def test_two_char_diff_markers(self):
+        # The bare conflict-marker style's minimum was inconsistent with the closer's
+        # (which already allowed 2+); opener/separator/closer all now accept 2+ chars.
+        r = ops("EDIT a.py\n<<\nold\n====\nnew\n>>>>\n")
+        self.assertEqual((r[0].data, r[0].extra), ("old", "new"))
+
+    def test_trailing_inline_comment_is_stripped(self):
+        r = ops("DELETE old/file.py  # no longer needed")
+        self.assertEqual(r[0].args[0], "old/file.py")
+        self.assertTrue(any("trailing comment" in w for w in p.take_warnings()))
+
+    def test_trailing_lowercase_sentence_is_not_run_as_a_command(self):
+        # RUN/COMMIT take free text and always "succeed" to parse, so a stray lowercase
+        # sentence after a real plan must be dropped as prose, not executed.
+        r = ops("DELETE a.py\nrun the tests manually after this lands")
+        self.assertEqual([o.command for o in r], ["DELETE"])
+        self.assertTrue(any("trailing text" in w for w in p.take_warnings()))
+
+    def test_short_lowercase_run_still_works(self):
+        r = ops("DELETE a.py\nrun pytest -x")
+        self.assertEqual([o.command for o in r], ["DELETE", "RUN"])
+        self.assertEqual(r[1].args[0], "pytest -x")
+
 
 # --------------------------------------------------------------------------- #
 # Things that must still be rejected
@@ -315,7 +348,7 @@ class StillStrict(Base):
                 self.assertIn(message, str(ctx.exception))
 
     def test_bad_move_copy_syntax(self):
-        for bad in ("MOVE old.txt to new.txt", "MOVE old.txt new.txt", "COPY old.txt destination/"):
+        for bad in ("MOVE old.txt new.txt", "COPY old.txt destination/"):
             with self.subTest(bad):
                 with self.assertRaises(ValueError) as ctx:
                     p.parse_operations(bad)

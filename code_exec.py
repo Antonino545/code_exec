@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -476,76 +477,164 @@ def _get_error_guidance(error_msg: str) -> str:
     hints = []
     if "ERR|SEARCH_NOT_FOUND" in error_msg:
         hints.append(
-            "- **SEARCH_NOT_FOUND**: The target SEARCH snippet does not exist in the file. "
-            "Inspect the 'Closest candidate' diff above: lines marked with '+' show the actual code currently in the file. "
-            "Update your SEARCH block to match those real lines verbatim."
+            "- **SEARCH_NOT_FOUND**: The SEARCH block does not exist verbatim in the file.\n"
+            "  ✅ **Do**: Copy the real lines from the file content provided in context "
+            "(lines marked `+` in the 'Closest candidate' diff above show what is actually there). "
+            "Update your SEARCH block to match those exact lines.\n"
+            "  ❌ **Do NOT**: Write the SEARCH block from memory, paraphrase it, "
+            "or copy it from a previous version of the file."
         )
     if "ERR|SEARCH_AMBIGUOUS" in error_msg:
         hints.append(
-            "- **SEARCH_AMBIGUOUS**: The SEARCH snippet matched multiple locations. "
-            "Include 1-3 lines of surrounding code before or after the target to form a unique local anchor."
+            "- **SEARCH_AMBIGUOUS**: The SEARCH snippet matched in multiple places.\n"
+            "  ✅ **Do**: Add 1–3 unique surrounding lines (a function name, a class, "
+            "a distinctive comment, or a unique variable) to make the anchor unambiguous.\n"
+            "  ❌ **Do NOT**: Use generic lines like `pass`, `return`, `}`, or bare HTML tags "
+            "as your SEARCH anchor — they appear everywhere."
         )
     if "ERR|SEARCH_TOO_BIG" in error_msg:
         hints.append(
-            "- **SEARCH_TOO_BIG**: The SEARCH block is too large (max 60 lines / 4000 characters). "
-            "Shrink the SEARCH block to a 3-6 line unique local anchor rather than whole functions or components."
+            "- **SEARCH_TOO_BIG**: The SEARCH block exceeds the 60-line / 4000-char limit.\n"
+            "  ✅ **Do**: Shrink the SEARCH block to a 3–6 line unique anchor. "
+            "For large regions, use the boundary anchor shorthand: first 4 lines + last 4 lines only.\n"
+            "  ❌ **Do NOT**: Include entire functions, classes, or components in a SEARCH block."
         )
     if "ERR|CREATE_EXISTS" in error_msg:
         hints.append(
-            "- **CREATE_EXISTS**: The file already exists. "
-            "Use `EDIT <file>` or `REPLACE_ALL <file>` to modify existing files instead of CREATE."
+            "- **CREATE_EXISTS**: The file already exists — CREATE only works for new files.\n"
+            "  ✅ **Do**: Use `EDIT <file>` with SEARCH/REPLACE to modify it, "
+            "or `REPLACE_ALL <file>` to replace every occurrence of a pattern.\n"
+            "  ❌ **Do NOT**: Use CREATE on a file that already exists."
         )
     if "ERR|FILE_NOT_FOUND" in error_msg:
+        # Try to surface files that are close to the missing path for context
+        nearby: list[str] = []
+        m = re.search(r"ERR\|FILE_NOT_FOUND\|([^\s|]+)", error_msg)
+        if m:
+            missing = m.group(1)
+            try:
+                missing_path = Path(missing)
+                parent = (ROOT / missing_path.parent) if missing_path.parent != Path(".") else ROOT
+                if parent.is_dir():
+                    candidates = sorted(
+                        p.relative_to(ROOT).as_posix()
+                        for p in parent.iterdir()
+                        if p.is_file() and not p.name.startswith(".")
+                    )[:6]
+                    if candidates:
+                        nearby = candidates
+            except Exception:
+                pass
+        nearby_hint = (
+            f"\n  Nearby files in the same directory: {', '.join(nearby)}" if nearby else ""
+        )
         hints.append(
-            "- **FILE_NOT_FOUND**: The file to edit or insert into does not exist. "
-            "Verify the relative file path, or use `CREATE <file>` if you meant to create a new file."
+            f"- **FILE_NOT_FOUND**: The path `{m.group(1) if m else '?'}` does not exist.{nearby_hint}\n"
+            "  ✅ **Do**: Verify the exact relative path from the project root. "
+            "Use `CREATE <file>` if you meant to create a new file.\n"
+            "  ❌ **Do NOT**: Guess paths. Only use paths that appear in the file list provided in context."
         )
     if "ERR|CONFLICTING_OPERATIONS" in error_msg:
         hints.append(
-            "- **CONFLICTING_OPERATIONS**: The plan contains contradictory operations on the same file. "
-            "Combine edits sequentially and never EDIT or APPEND after a DELETE."
+            "- **CONFLICTING_OPERATIONS**: The plan has contradictory operations on the same file.\n"
+            "  ✅ **Do**: Combine edits sequentially under a single EDIT block, "
+            "or order operations so dependencies exist first.\n"
+            "  ❌ **Do NOT**: EDIT or APPEND a file after DELETE, or CREATE a file twice."
         )
     if "ERR|MULTIPLE_PLANS" in error_msg:
         hints.append(
-            "- **MULTIPLE_PLANS**: More than one plan block was detected. "
-            "Output exactly ONE single plan block in your response."
+            "- **MULTIPLE_PLANS**: More than one `code_exec` block was detected.\n"
+            "  ✅ **Do**: Output exactly ONE single `code_exec` block. "
+            "Merge all operations into it.\n"
+            "  ❌ **Do NOT**: Split operations across multiple code blocks or add a second block "
+            "as a 'correction' — combine them into one."
         )
     if "ERR|PLAN_NOT_FOUND" in error_msg:
         hints.append(
-            "- **PLAN_NOT_FOUND**: No executable plan block was detected. "
-            "Ensure your plan starts with an executable code_exec block."
+            "- **PLAN_NOT_FOUND**: No executable plan block was detected (output may be cut off, "
+            "or the block was never opened/closed).\n"
+            "  ✅ **Do**: Wrap your plan in a fenced block with ````code_exec` as the language. "
+            "Use 4+ backticks if your content itself contains triple backticks.\n"
+            "  ❌ **Do NOT**: Place operations outside the fence, or start a block without closing it."
         )
     if "ERR|FORBIDDEN_COMMAND" in error_msg:
         hints.append(
-            "- **FORBIDDEN_COMMAND**: The RUN command is forbidden or destructive. "
-            "Use standard test runners (e.g. pytest, python3 -m unittest, npm test, cargo test)."
+            "- **FORBIDDEN_COMMAND**: The RUN command uses a forbidden or destructive pattern.\n"
+            "  ✅ **Do**: Use standard safe runners: `pytest`, `python3 -m unittest`, "
+            "`npm test`, `cargo test`, `ruff`, `black`.\n"
+            "  ❌ **Do NOT**: Use `rm -rf`, `sudo`, `curl | sh`, `wget`, or inline execution flags."
         )
     if "ERR|UNKNOWN_COMMAND" in error_msg:
         hints.append(
-            f"- **UNKNOWN_COMMAND**: An unrecognized command was used. Supported commands: {', '.join(sorted(COMMANDS))}. "
-            "Check the suggested command hint in the error and update your instruction."
+            f"- **UNKNOWN_COMMAND**: An unrecognized command was used. "
+            f"Supported commands: {', '.join(sorted(COMMANDS))}.\n"
+            "  ✅ **Do**: Check the suggested command hint in the error and update your instruction. "
+            "Shell commands must be prefixed with `RUN`.\n"
+            "  ❌ **Do NOT**: Place prose, comments, or explanations inside the `code_exec` block — "
+            "put them outside it."
         )
     if "ERR|PATCH_FAILED" in error_msg:
         hints.append(
-            "- **PATCH_FAILED**: A unified diff hunk could not be applied. "
-            "Verify the context lines against current file contents, or use EDIT with SEARCH/REPLACE instead."
+            "- **PATCH_FAILED**: A unified diff hunk could not be applied.\n"
+            "  ✅ **Do**: Verify the context lines match current file contents exactly. "
+            "Alternatively, switch to `EDIT` with SEARCH/REPLACE instead of PATCH.\n"
+            "  ❌ **Do NOT**: Generate a unified diff from memory — always base it on the actual file."
         )
     if not hints:
         hints.append("- Review the error details above and fix the problematic command or target block.")
-    return "\n".join(hints)
+    return "\n\n".join(hints)
+
+
+def _extract_operation_context(error_msg: str) -> str:
+    """Extract the failing operation description from the error message for the retry prompt."""
+    # Look for "Operation N (COMMAND path):" pattern
+    m = re.search(r"Operation\s+(\d+)\s+\(([^)]+)\)", error_msg)
+    if m:
+        return f"The failing operation was **Operation {m.group(1)}** (`{m.group(2)}`)."
+    return ""
+
+
+def _extract_candidate_diff(error_msg: str) -> str:
+    """Pull the closest-candidate diff block out of the error message if present."""
+    # The diff is injected by _find_closest_match between dashed lines
+    m = re.search(
+        r"(Closest candidate found at lines .+?)\n-{40,}\n(.+?)\n-{40,}",
+        error_msg,
+        re.DOTALL,
+    )
+    if m:
+        header = m.group(1).strip()
+        diff_body = m.group(2).strip()
+        return (
+            f"\n\n### File content at the closest match ({header}):\n"
+            "```diff\n"
+            f"{diff_body}\n"
+            "```\n"
+            "> Lines starting with `+` are the **actual current file content**. "
+            "Your SEARCH block must match those lines exactly."
+        )
+    return ""
 
 
 def copy_error_to_clipboard(error_msg: str) -> None:
     clean_err = error_msg.strip()
     guidance = _get_error_guidance(clean_err)
     fence = chr(96) * 3
+    op_context = _extract_operation_context(clean_err)
+    candidate_diff = _extract_candidate_diff(clean_err)
+
+    op_section = f"\n{op_context}\n" if op_context else ""
     prompt = (
         "The previous `code_exec` plan failed with the following error:\n\n"
-        f"{fence}\n{clean_err}\n{fence}\n\n"
-        "### Troubleshooting Guidance:\n"
+        f"{fence}\n{clean_err}\n{fence}\n"
+        f"{op_section}"
+        f"{candidate_diff}\n\n"
+        "### Troubleshooting Guidance:\n\n"
         f"{guidance}\n\n"
-        "You may think and explain your analysis outside the code block. "
-        f"Then output a single revised {fence}code_exec ... {fence} block fixing the issue."
+        "### Instructions for the fix:\n"
+        "- Fix **only** the failing operation. Do not re-emit operations that already succeeded.\n"
+        "- You may explain your analysis outside the code block.\n"
+        f"- Then output a single revised {fence}code_exec ...{fence} block that corrects the issue."
     )
     try:
         set_clipboard(prompt)
@@ -763,6 +852,10 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=int, default=DEFAULT_RUN_TIMEOUT,
                         help=f"Seconds allowed per RUN command, 0 = no limit "
                              f"(default {DEFAULT_RUN_TIMEOUT})")
+    parser.add_argument("--with-tree", dest="with_tree", action="store_true",
+                        help="With -p: append current project file tree to the copied instructions")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show which matching tier was used for each SEARCH block")
     args = parser.parse_args(argv)
 
     if args.action in {"1", "apply"}:
@@ -905,6 +998,31 @@ def main(argv=None) -> int:
             return fail(f"Instructions file not found: {instructions_path.name} (checked {instructions_path.parent})")
         try:
             content = instructions_path.read_text(encoding="utf-8")
+            if getattr(args, "with_tree", False):
+                # Build a compact project file tree and append it to the instructions
+                tree_lines: list[str] = []
+                try:
+                    for root_dir, dirs, files in os.walk(ROOT):
+                        dirs[:] = sorted(
+                            d for d in dirs
+                            if not d.startswith(".") and d not in {"__pycache__", "node_modules", ".venv", "venv", "context"}
+                        )
+                        rel_root = Path(root_dir).relative_to(ROOT)
+                        depth = len(rel_root.parts)
+                        prefix = "  " * depth
+                        if depth > 0:
+                            tree_lines.append(f"{prefix}{rel_root.name}/")
+                        for fname in sorted(files):
+                            if not fname.startswith(".") and not fname.endswith((".pyc",)):
+                                tree_lines.append(f"{'  ' * (depth + 1)}{fname}")
+                except Exception:
+                    pass
+                if tree_lines:
+                    tree_block = "\n".join(tree_lines)
+                    content += (
+                        f"\n\n## Project file tree (as of now)\n\n```\n{ROOT.name}/\n{tree_block}\n```\n"
+                        "\n> Use the paths above when writing file operations. Do NOT guess paths that aren't listed here.\n"
+                    )
             set_clipboard(content)
         except Exception as exc:
             return fail(f"Could not copy instructions: {exc}")
@@ -951,6 +1069,11 @@ def main(argv=None) -> int:
 
     if args.no_run and any(op.command == "RUN" for op in operations):
         return fail("Plan contains RUN but --no-run was given. No files were modified.")
+
+    # Wire --verbose into the matcher before plan execution
+    if getattr(args, "verbose", False):
+        import code_exec_matcher as _matcher_mod
+        _matcher_mod.VERBOSE = True
 
     try:
         reason, deferred = preflight(operations)

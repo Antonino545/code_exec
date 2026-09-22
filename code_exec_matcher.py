@@ -10,6 +10,15 @@ from pathlib import Path
 from code_exec_types import MatchResult, OpError
 from code_exec_ui import ui
 
+# Set to True via --verbose to trace which matching tier was used for each SEARCH block.
+VERBOSE: bool = False
+
+
+def _verbose_note(msg: str) -> None:
+    if VERBOSE:
+        ui.warn(f"[matcher] {msg}")
+
+
 
 @dataclass
 class Hunk:
@@ -338,11 +347,6 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         return _find_unique_impl(doc, needle, what, target)
 
 
-def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
-    with ui.searching(target):
-        return _find_unique_impl(doc, needle, what, target)
-
-
 def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness:
@@ -372,6 +376,7 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
     count = doc.count(needle)
     if count == 1:
         start = doc.index(needle)
+        _verbose_note(f"Tier 1 (exact): matched {target}")
         return MatchResult(start, start + len(needle), "", False, None)
     if count > 1:
         doc_lines = doc.split("\n")
@@ -405,36 +410,44 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
     spans = _match_line_spans(doc_lines, want_trailing, mode="trailing", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
+        _verbose_note(f"Tier 2 (trailing whitespace): matched {target} at lines {i + 1}-{last + 1}")
         return MatchResult(start, end, " (matched ignoring trailing whitespace)", True, (i, last))
     if len(spans) > 1:
         raise _format_spans_error(err_prefix, target, spans)
+    _verbose_note(f"Tier 2 (trailing whitespace): no match in {target}")
 
     # ---- Tier 3: Indentation tolerant ----
     want_indent = [ln.strip() for ln in want_raw]
     spans = _match_line_spans(doc_lines, want_indent, mode="indent", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
+        _verbose_note(f"Tier 3 (indentation): matched {target} at lines {i + 1}-{last + 1}")
         return MatchResult(start, end, " (matched with indentation tolerance)", True, (i, last))
     if len(spans) > 1:
         raise _format_spans_error(err_prefix, target, spans)
+    _verbose_note(f"Tier 3 (indentation): no match in {target}")
 
     # ---- Tier 4: Harmless whitespace normalization (spaces collapsed) ----
     want_ws = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
     spans = _match_line_spans(doc_lines, want_ws, mode="whitespace", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
+        _verbose_note(f"Tier 4 (whitespace collapse): matched {target} at lines {i + 1}-{last + 1}")
         return MatchResult(start, end, " (matched with whitespace normalization)", True, (i, last))
     if len(spans) > 1:
         raise _format_spans_error(err_prefix, target, spans)
+    _verbose_note(f"Tier 4 (whitespace collapse): no match in {target}")
 
     # ---- Tier 5: JSX-aware line match ----
     want_jsx = [_normalize_jsx_line(ln) for ln in want_raw]
     spans = _match_line_spans(doc_lines, want_jsx, mode="jsx", capture_newline=capture_nl)
     if len(spans) == 1:
         start, end, i, last = spans[0]
+        _verbose_note(f"Tier 5 (JSX normalization): matched {target} at lines {i + 1}-{last + 1}")
         return MatchResult(start, end, " (matched with JSX normalization)", True, (i, last))
     if len(spans) > 1:
         raise _format_spans_error(err_prefix, target, spans)
+    _verbose_note(f"Tier 5 (JSX): no match in {target}")
 
     # ---- Tier 6: Language token-aware matching (Python / JS / TS) ----
     target_lower = target.lower()
@@ -442,17 +455,21 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
         py_spans = _match_python_tokens(doc, needle)
         if len(py_spans) == 1:
             start, end, i, last = py_spans[0]
+            _verbose_note(f"Tier 6a (Python tokens): matched {target} at lines {i + 1}-{last + 1}")
             return MatchResult(start, end, " (matched with Python token normalization)", True, (i, last))
         if len(py_spans) > 1:
             raise _format_spans_error(err_prefix, target, py_spans)
+        _verbose_note(f"Tier 6a (Python tokens): no match in {target}")
 
     if target_lower.endswith((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")):
         js_spans = _match_js_tokens(doc, needle)
         if len(js_spans) == 1:
             start, end, i, last = js_spans[0]
+            _verbose_note(f"Tier 6b (JS/TS tokens): matched {target} at lines {i + 1}-{last + 1}")
             return MatchResult(start, end, " (matched with JS/TS token normalization)", True, (i, last))
         if len(js_spans) > 1:
             raise _format_spans_error(err_prefix, target, js_spans)
+        _verbose_note(f"Tier 6b (JS/TS tokens): no match in {target}")
 
     # ---- Tier 7: High-similarity fuzzy match (>= 90%) ----
     fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90, capture_newline=capture_nl)
@@ -464,7 +481,9 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
             note = f" (fuzzy matched with {pct}% similarity)"
         else:
             note = " (matched ignoring non-standard symbols)"
+        _verbose_note(f"Tier 7 (fuzzy {pct}%): matched {target} at lines {s_line + 1}-{e_line + 1}")
         return MatchResult(start, end, note, True, (s_line, e_line))
+    _verbose_note(f"Tier 7 (fuzzy): no match in {target}")
 
     # ---- Tier 8: Oversized block boundary anchor fallback ----
     if len(want_raw) > MAX_SEARCH_LINES:
@@ -477,7 +496,9 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
             _, t_end, _, t_eline = tail_spans[0]
             if h_start < t_end:
                 ui.warn(f"Oversized {what} block matched using boundary anchors at lines {h_sline + 1}-{t_eline + 1}")
+                _verbose_note(f"Tier 8 (boundary anchors): matched {target} lines {h_sline + 1}-{t_eline + 1}")
                 return MatchResult(h_start, t_end, " (matched oversized block via boundary anchors)", True, (h_sline, t_eline))
+        _verbose_note(f"Tier 8 (boundary anchors): no match in {target}")
 
     # ---- Diagnostic failure ----
     diagnostic = _find_closest_match(doc, needle)
