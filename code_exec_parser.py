@@ -31,6 +31,10 @@ COMMAND_ALIASES = {
     "READ": "FETCH",
     "READ_FILE": "FETCH",
     "FETCH_FILE": "FETCH",
+    "FETCH_FUNCTION": "FETCH",
+    "FETCH_FUNC": "FETCH",
+    "FETCH_DEF": "FETCH",
+    "FETCH_CLASS": "FETCH",
     "GET": "FETCH",
 }
 
@@ -775,18 +779,26 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
         return Operation("CHMOD", (_path(parts[0]), parts[1].strip())), i
     if command == "FETCH":
+        # Supports:
+        #   FETCH path
+        #   FETCH path:10-50 or FETCH path 10-50
+        #   FETCH path:function_name or FETCH path function_name
+        #   FETCH path:Class.method
         parts = rest.split(None, 1)
-        if len(parts) == 2 and re.match(r"^\d+(?:-\d+)?$", parts[1].strip()):
-            p_arg = _path(parts[0].rstrip(":"))
-            r_arg = parts[1].strip()
-        elif ":" in parts[0]:
-            p_cand, r_cand = parts[0].rsplit(":", 1)
-            if re.match(r"^\d+(?:-\d+)?$", r_cand):
-                p_arg = _path(p_cand)
-                r_arg = r_cand
+        if len(parts) == 2:
+            target_arg = parts[1].strip()
+            # If second part is 'from path' style or a target specifier
+            if parts[0].lower() in {"function", "func", "def", "class"}:
+                # e.g., FETCH func my_func: path
+                target_arg = parts[1].strip()
+                p_arg = _path(parts[0])
             else:
                 p_arg = _path(parts[0].rstrip(":"))
-                r_arg = ""
+                r_arg = target_arg
+        elif ":" in parts[0]:
+            p_cand, r_cand = parts[0].rsplit(":", 1)
+            p_arg = _path(p_cand)
+            r_arg = r_cand.strip()
         else:
             p_arg = _path(rest.rstrip(":"))
             r_arg = ""

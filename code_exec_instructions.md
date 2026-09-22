@@ -22,7 +22,7 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 - `INSERT_BEFORE|INSERT_AFTER path` + `MARKER` / `CONTENT` blocks (same two styles)
 - `PATCH path <<< unified diff >>>`
 - `APPEND|PREPEND path <<< content >>>`
-- `FETCH path[:start-end]`: request full file or line slice onto clipboard (for skeleton/lazy context)
+- `FETCH path[:start-end|:symbol]`: request full file, line slice, or function/class onto clipboard (e.g. `FETCH src/app.py:my_func` or `FETCH src/models.py:User.save`)
 - `MKDIR path` · `DELETE path` (file or folder) · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs/regex allowed: `MOVE test* -> dest`, `MOVE regex:^log_.* -> logs`)
 - `RUN cmd`: only `python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`. No `-c/-i/-e`, `rm -rf`, `sudo`. Shell commands always need the `RUN` prefix.

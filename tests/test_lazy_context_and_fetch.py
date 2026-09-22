@@ -34,20 +34,43 @@ class TestLazyContextAndFetch(unittest.TestCase):
             shutil.rmtree(self.scratch, ignore_errors=True)
 
     def test_parse_fetch_instruction_formats(self):
-        ops = p.parse_operations("FETCH src/app.py\nFETCH src/logic.py:10-50\nFETCH utils.py 20-30")
-        self.assertEqual(len(ops), 3)
+        ops = p.parse_operations("FETCH src/app.py\nFETCH src/logic.py:10-50\nFETCH utils.py 20-30\nFETCH src/core.py:my_function\nFETCH_FUNCTION api.py:process_data")
+        self.assertEqual(len(ops), 5)
         self.assertEqual(ops[0].command, "FETCH")
         self.assertEqual(ops[0].args, ("src/app.py",))
         self.assertEqual(ops[1].args, ("src/logic.py", "10-50"))
         self.assertEqual(ops[2].args, ("utils.py", "20-30"))
+        self.assertEqual(ops[3].args, ("src/core.py", "my_function"))
+        self.assertEqual(ops[4].args, ("api.py", "process_data"))
 
     def test_parse_fetch_aliases(self):
-        ops = p.parse_operations("READ src/app.py\nGET src/utils.py:5-15")
-        self.assertEqual(len(ops), 2)
+        ops = p.parse_operations("READ src/app.py\nGET src/utils.py:5-15\nFETCH_FUNC logic.py:compute")
+        self.assertEqual(len(ops), 3)
         self.assertEqual(ops[0].command, "FETCH")
         self.assertEqual(ops[0].args, ("src/app.py",))
         self.assertEqual(ops[1].command, "FETCH")
         self.assertEqual(ops[1].args, ("src/utils.py", "5-15"))
+        self.assertEqual(ops[2].command, "FETCH")
+        self.assertEqual(ops[2].args, ("logic.py", "compute"))
+
+    def test_handle_fetch_operations_symbol(self):
+        rel_path = f"_test_scratch_fetch/sample.py"
+        op = Operation("FETCH", (rel_path, "foo"))
+        with patch("code_exec.set_clipboard"):
+            body, count, lines, toks = handle_fetch_operations([op])
+            self.assertEqual(count, 1)
+            self.assertIn("def foo(x, y):", body)
+            self.assertNotIn("class Bar", body)
+
+    def test_handle_fetch_operations_class_method(self):
+        rel_path = f"_test_scratch_fetch/sample.py"
+        op = Operation("FETCH", (rel_path, "Bar.baz"))
+        with patch("code_exec.set_clipboard"):
+            body, count, lines, toks = handle_fetch_operations([op])
+            self.assertEqual(count, 1)
+            self.assertIn("def baz(self", body)
+            self.assertIn("Bar.baz", body)
+            self.assertNotIn("def foo(", body)
 
     def test_handle_fetch_operations_full_file(self):
         rel_path = f"_test_scratch_fetch/sample.py"
