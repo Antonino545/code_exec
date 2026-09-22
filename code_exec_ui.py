@@ -289,6 +289,7 @@ class TerminalUI:
             "MOVE": c.CYAN, "COPY": c.CYAN, "RENAME": c.CYAN,
             "CHMOD": c.CYAN, "COMMIT": c.CYAN,
             "RUN": c.CORAL,
+            "FETCH": c.CYAN,
         }
         label = self._BADGE_LABELS.get(cmd, cmd)
         return c.paint(f" {label:<7} ", colors.get(cmd, c.SLATE), bold=True)
@@ -321,7 +322,9 @@ class TerminalUI:
             return f"{args[0]} {c.paint(args[1], c.WHITE)}", "", 0, 0
         if cmd == "COMMIT":
             return c.paint(f'"{args[0]}"', c.WHITE), "", 0, 0
-
+        if cmd == "FETCH":
+            range_info = f" {c.paint(f'lines {args[1]}', c.CYAN)}" if len(args) > 1 and args[1] else ""
+            return f"{args[0]}{range_info}", "", 0, 0
         if cmd == "CREATE":
             add = self._line_count(op.data)
         elif cmd in {"EDIT", "REPLACE_ALL"}:
@@ -422,6 +425,7 @@ class TerminalUI:
         row("EDIT", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
         row("PATCH", "path", c.AMBER, "<<< unified diff >>>", bold=True)
         row("REPLACE_ALL", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
+        row("FETCH", "path[:range]", c.CYAN, "(request file context to clipboard)", bold=True)
         row("DELETE", "path", c.RED, "(file or folder)", bold=True)
         row("MKDIR", "path", c.GREEN, "(create folder)", bold=True)
         row("CHMOD", "path mode", c.CYAN, "(+x, 755, 644)", bold=True)
@@ -446,6 +450,7 @@ class TerminalUI:
         row("--yes", "Apply without asking for confirmation", c.CYAN)
         row("--no-commit", "Skip the commit prompt", c.CYAN)
         row("--export-context", "Export clean context folder (alias: export-concet)", c.CYAN)
+        row("--compact", "Export skeleton/summarized context (token saver)", c.CYAN)
         row("--ignore-file <name>", "Specify custom ignore file (default: .code-exec-ignore)", c.CYAN)
         row("--file <path>", "Read the plan from a file ('-' for stdin)", c.CYAN)
         row("--prompt, -p", "Copy the AI instructions prompt", c.CYAN)
@@ -547,9 +552,8 @@ class TerminalUI:
         for op in operations:
             cmd = op.command
             args = op.args
-            if cmd in {"RUN", "COMMIT"} or not args:
+            if cmd in {"RUN", "COMMIT", "FETCH"} or not args:
                 continue
-
             if cmd in {"MOVE", "COPY", "RENAME"}:
                 src = str(args[0])
                 dst = str(args[1])
@@ -880,17 +884,30 @@ class TerminalUI:
         c = self.palette
         self._card("Commit skipped", "warn", [self._line(error, c.AMBER)])
 
-    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0) -> None:
+    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0, compact: bool = False) -> None:
         c = self.palette
         token_str = f"~{tokens:,} tokens ({size_kb} KB)"
+        mode_str = "compact skeleton (token saver)" if compact else "full context"
         lines = [
             f"  {c.paint('Location:', c.SLATE):<18} {c.paint(location, c.CYAN, bold=True)}",
+            f"  {c.paint('Mode:', c.SLATE):<18} {c.paint(mode_str, c.CYAN)}",
             f"  {c.paint('Files included:', c.SLATE):<18} {c.paint(str(included), c.GREEN, bold=True)}",
             f"  {c.paint('Est. Tokens:', c.SLATE):<18} {c.paint(token_str, c.AMBER, bold=True)}",
             f"  {c.paint('Files ignored:', c.SLATE):<18} {c.paint(str(ignored), c.SLATE)}",
             f"  {c.paint('Ignore file:', c.SLATE):<18} {c.paint(ignore_file, c.WHITE)}",
         ]
         self._card("Clean Context Exported", "ok", lines)
+
+    def fetch_success(self, file_count: int, total_lines: int, tokens: int = 0) -> None:
+        c = self.palette
+        token_str = f"~{tokens:,} tokens"
+        noun = "file" if file_count == 1 else "files"
+        lines = [
+            self._line(f"Loaded {file_count} requested {noun} ({total_lines} lines).", c.WHITE, bold=True),
+            self._kv("Est. Tokens", c.paint(token_str, c.AMBER, bold=True)),
+            self._tip("Requested file content copied to clipboard. Paste into your AI chat."),
+        ]
+        self._card("Context Fetched", "ok", lines)
 
     # ------------------------------------------------------------------ #
     # Warnings, errors & recovery

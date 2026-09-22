@@ -28,6 +28,10 @@ COMMAND_ALIASES = {
     "RUN_COMMAND": "RUN",
     "EXEC": "RUN",
     "EXECUTE": "RUN",
+    "READ": "FETCH",
+    "READ_FILE": "FETCH",
+    "FETCH_FILE": "FETCH",
+    "GET": "FETCH",
 }
 
 # --------------------------------------------------------------------------- #
@@ -726,7 +730,23 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         if len(parts) != 2:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
         return Operation("CHMOD", (_path(parts[0]), parts[1].strip())), i
-
+    if command == "FETCH":
+        parts = rest.split(None, 1)
+        if len(parts) == 2 and re.match(r"^\d+(?:-\d+)?$", parts[1].strip()):
+            p_arg = _path(parts[0].rstrip(":"))
+            r_arg = parts[1].strip()
+        elif ":" in parts[0]:
+            p_cand, r_cand = parts[0].rsplit(":", 1)
+            if re.match(r"^\d+(?:-\d+)?$", r_cand):
+                p_arg = _path(p_cand)
+                r_arg = r_cand
+            else:
+                p_arg = _path(parts[0].rstrip(":"))
+                r_arg = ""
+        else:
+            p_arg = _path(rest.rstrip(":"))
+            r_arg = ""
+        return Operation("FETCH", (p_arg, r_arg) if r_arg else (p_arg,)), i
     if command in {"DELETE", "MKDIR", "TOUCH"}:
         return Operation(command, (_path(rest.rstrip(":")),)), i
 

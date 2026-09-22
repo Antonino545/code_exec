@@ -302,20 +302,24 @@ def execute(op: Operation, fs) -> str | None:
         return f"{past} {args[0]} -> {args[1]}"
 
     if command == "MKDIR":
-        path = safe_path(args[0])
-        if fs.lexists(path) and not fs.is_dir(path):
-            raise OpError(f"Path exists but is not a directory: {args[0]}")
-        fs.mkdir(path)
-        return f"Created directory {args[0]}"
-
-    if command == "RUN":
-        fs.run(args[0])
-        return None
-
-    if command == "COMMIT":
-        return None
-
-    raise OpError(f"Unsupported command: {command}")
+        if command == "MKDIR":
+            path = safe_path(args[0])
+            if fs.lexists(path) and not fs.is_dir(path):
+                raise OpError(f"Path exists but is not a directory: {args[0]}")
+            fs.mkdir(path)
+            return f"Created directory {args[0]}"
+        if command == "FETCH":
+            path = safe_path(args[0])
+            if not fs.is_file(path):
+                raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+            range_str = f" ({args[1]})" if len(args) > 1 and args[1] else ""
+            return f"Fetched {args[0]}{range_str}"
+        if command == "RUN":
+            fs.run(args[0])
+            return None
+        if command == "COMMIT":
+            return None
+        raise OpError(f"Unsupported command: {command}")
 
 
 def should_show_folder_tree(operations: list[Operation]) -> bool:
@@ -342,7 +346,9 @@ def check_paths(op: Operation) -> None:
             continue
         if idx == 0 and op.command in {"MOVE", "COPY"} and value.startswith("regex:"):
             continue
-        safe_path(value, follow_leaf=False)
+        if op.command in {"FETCH", "CHMOD"} and idx > 0:
+            continue
+        safe_path(value, follow_leaf=(op.command != "FETCH"))
 
 
 def generate_plan_diff(operations: list[Operation]) -> str:
@@ -428,7 +434,8 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
         if op.command == "RUN":
             validate_run_command(op.args[0])
         elif op.command not in {"RUN", "COMMIT"}:
-            for path_arg in op.args:
+            args_to_check = (op.args[0],) if op.command in {"FETCH", "CHMOD"} else op.args
+            for path_arg in args_to_check:
                 path_str = str(safe_path(path_arg, follow_leaf=False))
                 history = file_history.setdefault(path_str, [])
                 if op.command == "CREATE" and "CREATE" in history:
@@ -737,19 +744,74 @@ def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False) -> int:
-    fs = VirtualFS() if dry_run else RealFS(timeout)
+def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, int]:
+    """Reads requested files/ranges, formats them for AI context, and copies to clipboard."""
+    from code_exec_plan_export import estimate_tokens
+    sections = [
+        "## Requested File Context\n",
+        "> The following file contents were requested via `FETCH` for accurate edits.\n",
+    ]
+    total_lines = 0
+    for op in fetch_ops:
+        path_str = op.args[0]
+        range_str = op.args[1] if len(op.args) > 1 and op.args[1] else None
+        target_path = safe_path(path_str)
+        if not target_path.is_file():
+            raise OpError(f"ERR|FILE_NOT_FOUND|{path_str}")
+        content = read_text(target_path)
+        lines = content.splitlines()
+        total_file_lines = len(lines)
+        if range_str:
+            m = re.match(r"^(\d+)(?:-(\d+))?$", range_str)
+            if m:
+                start = max(1, int(m.group(1)))
+                end = min(total_file_lines, int(m.group(2))) if m.group(2) else total_file_lines
+                if start > end:
+                    start, end = end, start
+                selected_lines = lines[start - 1 : end]
+                header = f"### `{path_str}` (lines {start}-{end} of {total_file_lines})\n"
+                total_lines += len(selected_lines)
+                body = "\n".join(selected_lines)
+            else:
+                header = f"### `{path_str}` (full file, {total_file_lines} lines)\n"
+                total_lines += total_file_lines
+                body = content
+        else:
+            header = f"### `{path_str}` (full file, {total_file_lines} lines)\n"
+            total_lines += total_file_lines
+            body = content
+        ext = target_path.suffix.lstrip(".")
+        sections.append(f"{header}```{ext}\n{body}\n```\n")
 
+    sections.append("> You can now emit the executable ````code_exec```` plan block based on the exact lines above.")
+    result_text = "\n".join(sections)
+    tokens = estimate_tokens(result_text)
+    set_clipboard(result_text)
+    return result_text, len(fetch_ops), total_lines, tokens
+
+
+def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False) -> int:
+    fetch_ops = [op for op in operations if op.command == "FETCH"]
+    exec_ops = [op for op in operations if op.command not in {"COMMIT", "FETCH"}]
+
+    if fetch_ops:
+        try:
+            _, count, lines_fetched, tokens = handle_fetch_operations(fetch_ops)
+            ui.fetch_success(count, lines_fetched, tokens)
+        except OpError as exc:
+            return fail(str(exc))
+        if not exec_ops:
+            return 0
+
+    fs = VirtualFS() if dry_run else RealFS(timeout)
     if hasattr(signal, "SIGTERM"):
         try:
             signal.signal(signal.SIGTERM, _raise_interrupt)
         except (ValueError, OSError):
             pass
-
-    exec_ops = [op for op in operations if op.command != "COMMIT"]
     commit_op = next((op for op in operations if op.command == "COMMIT"), None)
     commit_msg = commit_op.args[0] if commit_op else None
-
+    ui.start_apply(len(exec_ops))
     ui.start_apply(len(exec_ops))
     modified_paths: list[str] = []
 
@@ -832,6 +894,8 @@ def main(argv=None) -> int:
                         help="Path or name of custom ignore configuration file (default: .code-exec-ignore)")
     parser.add_argument("--target-dir", default="context",
                         help="Target output directory for clean plan export (default: context)")
+    parser.add_argument("--compact", action="store_true",
+                        help="Export compact skeleton/summaries for context to minimize tokens")
     parser.add_argument("--diff", action="store_true",
                         help="Display unified diff of file changes before applying")
     parser.add_argument("--tree", action="store_true",
@@ -856,6 +920,8 @@ def main(argv=None) -> int:
                         help="With -p: append current project file tree to the copied instructions")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show which matching tier was used for each SEARCH block")
+    parser.add_argument("--short", action="store_true",
+                        help="With -p: copy the compact instructions (for small/local models)")
     args = parser.parse_args(argv)
 
     if args.action in {"1", "apply"}:
@@ -886,6 +952,24 @@ def main(argv=None) -> int:
         args.action = None
     elif args.action in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
         args.export_plan = True
+        args.action = None
+    elif args.action in {"fetch", "get", "read"}:
+        if not args.subarg:
+            return fail("fetch requires a file path: code-exec fetch <path>[:start-end]")
+        try:
+            target = args.subarg
+            parts = target.split(":", 1)
+            raw_path = parts[0]
+            range_str = parts[1] if len(parts) > 1 else ""
+            op = Operation("FETCH", (clean_path(raw_path), range_str))
+            _, count, lines_fetched, tokens = handle_fetch_operations([op])
+            ui.fetch_success(count, lines_fetched, tokens)
+            return 0
+        except Exception as exc:
+            return fail(f"Fetch failed: {exc}")
+    elif args.action in {"9", "short-prompt"}:
+        args.prompt = True
+        args.short = True
         args.action = None
     elif args.action == "themes":
         themes = list(ui.palette.themes.keys())
@@ -970,6 +1054,7 @@ def main(argv=None) -> int:
                 output_dirname=target_out,
                 ignore_filename=args.ignore_file,
                 root=Path.cwd().resolve(),
+                compact=args.compact,
             )
             ui.plan_export_success(
                 location=str(res["location"]),
@@ -978,6 +1063,7 @@ def main(argv=None) -> int:
                 ignore_file=str(res["ignore_file"]),
                 tokens=int(res.get("tokens", 0)),
                 size_kb=float(res.get("size_kb", 0.0)),
+                compact=bool(res.get("compact", False)),
             )
             return 0
         except Exception as exc:
@@ -1093,7 +1179,8 @@ def main(argv=None) -> int:
     if args.dry_run:
         return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True)
 
-    if not args.yes:
+    is_pure_fetch = all(op.command == "FETCH" for op in operations)
+    if not args.yes and not is_pure_fetch:
         if not ui.confirm(diff_text=diff_text, on_view_tree=(lambda: ui.show_tree(operations)) if operations else None):
             ui.cancelled()
             return 0

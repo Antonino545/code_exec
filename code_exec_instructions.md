@@ -22,6 +22,7 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 - `INSERT_BEFORE|INSERT_AFTER path` + `MARKER` / `CONTENT` blocks (same two styles)
 - `PATCH path <<< unified diff >>>`
 - `APPEND|PREPEND path <<< content >>>`
+- `FETCH path[:start-end]`: request full file or line slice onto clipboard (for skeleton/lazy context)
 - `MKDIR path` · `DELETE path` (file or folder) · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs/regex allowed: `MOVE test* -> dest`, `MOVE regex:^log_.* -> logs`)
 - `RUN cmd`: only `python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`. No `-c/-i/-e`, `rm -rf`, `sudo`. Shell commands always need the `RUN` prefix.
@@ -81,6 +82,22 @@ Delimiter rules:
 ### Block content
 - ❌ **NEVER place prose, comments, or explanations inside the `code_exec` block.** Put them outside.
 - ❌ **NEVER mix block styles** (`SEARCH <<<` then `====`). Pick one style and use it throughout.
+
+### Skeleton context & FETCH workflow
+When provided with skeleton or compact context to conserve tokens:
+1. Examine the project tree, classes, and function signatures.
+2. If full context or exact lines are needed to produce verbatim `SEARCH` blocks, request them:
+
+```
+
+```code_exec
+FETCH src/matcher.py:100-160
+FETCH src/types.py
+
+```
+
+```
+3. The engine copies those file sections to the user's clipboard. In the subsequent turn, emit the definitive `EDIT` / `CREATE` operations.
 
 ## Rules
 - Paths are project-relative (`src/App.jsx`). No `..`, absolute paths or `.git`. Never touch `.env*`, keys/certs, `.github/workflows/*`, `.gitlab-ci.yml`.
