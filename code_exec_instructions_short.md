@@ -17,7 +17,7 @@ COMMAND path [<<< content >>>]
 - `APPEND|PREPEND path <<< content >>>`
 - `INSERT_BEFORE|INSERT_AFTER path` — with MARKER / CONTENT pairs
 - `PATCH path <<< unified diff >>>`
-- `FETCH path[:start-end]` — request full file or line slice (for skeleton context)
+- `FETCH path[:start-end]` — request full file or line slice. **Batch all needed FETCH lines in ONE block**.
 - `MKDIR path` · `DELETE path` · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs OK: `MOVE test* -> dest/`)
 - `RUN cmd` — allowed: `pytest`, `python3 -m unittest`, `npm test`, `cargo test`, `ruff`, `black`

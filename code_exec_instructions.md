@@ -83,21 +83,19 @@ Delimiter rules:
 - ❌ **NEVER place prose, comments, or explanations inside the `code_exec` block.** Put them outside.
 - ❌ **NEVER mix block styles** (`SEARCH <<<` then `====`). Pick one style and use it throughout.
 
-### Skeleton context & FETCH workflow
+### Skeleton context & FETCH workflow (Batch Requests)
 When provided with skeleton or compact context to conserve tokens:
 1. Examine the project tree, classes, and function signatures.
-2. If full context or exact lines are needed to produce verbatim `SEARCH` blocks, request them:
-
-```
+2. **Batch all FETCH requests into a SINGLE block**: If you anticipate needing multiple files or line slices, list **all** of them together in one `code_exec` block instead of asking turn-by-turn.
+3. Keep line slices bounded when possible (e.g., `FETCH path/file.py:80-140` instead of the whole file if you only need one component/function).
 
 ```code_exec
 FETCH src/matcher.py:100-160
 FETCH src/types.py
-
+FETCH src/utils/helpers.js:1-50
 ```
 
-```
-3. The engine copies those file sections to the user's clipboard. In the subsequent turn, emit the definitive `EDIT` / `CREATE` operations.
+4. The engine reads all requested files and copies their contents directly to the user's clipboard (or saves them to `context/FETCHED_CONTEXT.md` if the payload is very large). In the next turn, emit the definitive `EDIT` / `CREATE` operations.
 
 ## Rules
 - Paths are project-relative (`src/App.jsx`). No `..`, absolute paths or `.git`. Never touch `.env*`, keys/certs, `.github/workflows/*`, `.gitlab-ci.yml`.

@@ -81,6 +81,7 @@ from code_exec_parser import (
     parse_operations,
     read_block,
     set_clipboard,
+    set_clipboard_file,
 )
 
 # Re-export filesystems and path/text helpers
@@ -302,24 +303,23 @@ def execute(op: Operation, fs) -> str | None:
         return f"{past} {args[0]} -> {args[1]}"
 
     if command == "MKDIR":
-        if command == "MKDIR":
-            path = safe_path(args[0])
-            if fs.lexists(path) and not fs.is_dir(path):
-                raise OpError(f"Path exists but is not a directory: {args[0]}")
-            fs.mkdir(path)
-            return f"Created directory {args[0]}"
-        if command == "FETCH":
-            path = safe_path(args[0])
-            if not fs.is_file(path):
-                raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
-            range_str = f" ({args[1]})" if len(args) > 1 and args[1] else ""
-            return f"Fetched {args[0]}{range_str}"
-        if command == "RUN":
-            fs.run(args[0])
-            return None
-        if command == "COMMIT":
-            return None
-        raise OpError(f"Unsupported command: {command}")
+        path = safe_path(args[0])
+        if fs.lexists(path) and not fs.is_dir(path):
+            raise OpError(f"Path exists but is not a directory: {args[0]}")
+        fs.mkdir(path)
+        return f"Created directory {args[0]}"
+    if command == "FETCH":
+        path = safe_path(args[0])
+        if not fs.is_file(path):
+            raise OpError(f"ERR|FILE_NOT_FOUND|{args[0]}")
+        range_str = f" ({args[1]})" if len(args) > 1 and args[1] else ""
+        return f"Fetched {args[0]}{range_str}"
+    if command == "RUN":
+        fs.run(args[0])
+        return None
+    if command == "COMMIT":
+        return None
+    raise OpError(f"Unsupported command: {command}")
 
 
 def should_show_folder_tree(operations: list[Operation]) -> bool:
@@ -667,33 +667,30 @@ def _raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def generate_commit_prompt() -> str:
-    """Collects git diff and untracked files into an AI prompt for commit generation."""
+def generate_commit_prompt() -> tuple[str, Path | None]:
+    """Collects git diff and untracked files into an AI prompt, saving to file if too large."""
+    from code_exec_plan_export import estimate_tokens
+
     if not (ROOT / ".git").exists():
         raise OpError("ERR|NOT_GIT_REPO|Current directory is not a git repository (.git missing)")
-
     diff_res = subprocess.run(["git", "diff", "HEAD"], cwd=ROOT, capture_output=True, text=True)
     diff_text = diff_res.stdout.strip()
     if not diff_text:
         diff_cached = subprocess.run(["git", "diff", "--cached"], cwd=ROOT, capture_output=True, text=True)
         diff_unstaged = subprocess.run(["git", "diff"], cwd=ROOT, capture_output=True, text=True)
         diff_text = f"{diff_cached.stdout}\n{diff_unstaged.stdout}".strip()
-
     status_res = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True)
     untracked = [line[3:].strip() for line in status_res.stdout.splitlines() if line.startswith("?? ")]
-
     if not diff_text and not untracked:
         raise OpError("No changes detected in git repository (working tree clean)")
-
     sections = []
     if diff_text:
         sections.append(f"```diff\n{diff_text}\n```")
     if untracked:
         untracked_list = "\n".join(f"- {p}" for p in untracked)
         sections.append(f"Untracked new files:\n{untracked_list}")
-
     changes_body = "\n\n".join(sections)
-    return (
+    prompt_body = (
         "Generate a concise, scoped conventional commit message for the following repository changes.\n\n"
         f"{changes_body}\n\n"
         "Output ONLY a single executable `code_exec` block:\n"
@@ -701,6 +698,26 @@ def generate_commit_prompt() -> str:
         "COMMIT type(scope): concise summary\n"
         "```"
     )
+
+    tokens = estimate_tokens(prompt_body)
+    MAX_CLIPBOARD_TOKENS = 18000
+    MAX_CLIPBOARD_BYTES = 75 * 1024
+
+    out_folder = ROOT / "context"
+    dump_file = None
+
+    if tokens > MAX_CLIPBOARD_TOKENS or len(prompt_body.encode("utf-8")) > MAX_CLIPBOARD_BYTES:
+        out_folder.mkdir(parents=True, exist_ok=True)
+        dump_path = out_folder / "COMMIT_DIFF.md"
+        dump_path.write_text(prompt_body, encoding="utf-8")
+        copied_file = set_clipboard_file(dump_path)
+        if not copied_file:
+            set_clipboard(prompt_body)
+        dump_file = dump_path.relative_to(ROOT)
+    else:
+        set_clipboard(prompt_body)
+
+    return prompt_body, dump_file
 
 
 def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
@@ -786,7 +803,24 @@ def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, 
     sections.append("> You can now emit the executable ````code_exec```` plan block based on the exact lines above.")
     result_text = "\n".join(sections)
     tokens = estimate_tokens(result_text)
-    set_clipboard(result_text)
+
+    # If payload is very large (> 18,000 tokens or > 75 KB), save to a file and notify clipboard
+    MAX_CLIPBOARD_TOKENS = 18000
+    MAX_CLIPBOARD_BYTES = 75 * 1024
+
+    out_folder = ROOT / "context"
+    out_folder.mkdir(parents=True, exist_ok=True)
+    dump_path = out_folder / "FETCHED_CONTEXT.md"
+    dump_path.write_text(result_text, encoding="utf-8")
+
+    # If payload is large, copy the actual file to clipboard so Cmd+V / Ctrl+V attaches the file
+    if tokens > MAX_CLIPBOARD_TOKENS or len(result_text.encode("utf-8")) > MAX_CLIPBOARD_BYTES:
+        copied_file = set_clipboard_file(dump_path)
+        if not copied_file:
+            set_clipboard(result_text)
+    else:
+        set_clipboard(result_text)
+
     return result_text, len(fetch_ops), total_lines, tokens
 
 
@@ -1077,11 +1111,10 @@ def main(argv=None) -> int:
 
     if args.commit_prompt:
         try:
-            prompt_body = generate_commit_prompt()
-            set_clipboard(prompt_body)
+            prompt_body, dump_file = generate_commit_prompt()
         except Exception as exc:
             return fail(f"Could not generate commit prompt: {exc}")
-        ui.commit_prompt_copied(len(prompt_body))
+        ui.commit_prompt_copied(len(prompt_body), file_path=dump_file)
         return 0
 
     if args.prompt:

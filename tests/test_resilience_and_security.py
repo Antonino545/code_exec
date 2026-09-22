@@ -255,16 +255,17 @@ class TestResilienceAndSecurity(unittest.TestCase):
     def test_generate_commit_prompt(self):
         from unittest.mock import patch, MagicMock
         from code_exec import generate_commit_prompt
-
         fake_diff = MagicMock(stdout="diff --git a/test.py b/test.py\n+new_feature = True\n")
         fake_status = MagicMock(stdout="?? untracked_file.txt\n")
-
         with patch("subprocess.run", side_effect=[fake_diff, fake_status]):
-            prompt = generate_commit_prompt()
-            self.assertIn("Generate a concise, scoped conventional commit message", prompt)
-            self.assertIn("+new_feature = True", prompt)
-            self.assertIn("untracked_file.txt", prompt)
-            self.assertIn("COMMIT type(scope):", prompt)
+            with patch("code_exec.set_clipboard") as mock_set:
+                prompt, dump_file = generate_commit_prompt()
+                self.assertIn("Generate a concise, scoped conventional commit message", prompt)
+                self.assertIn("+new_feature = True", prompt)
+                self.assertIn("untracked_file.txt", prompt)
+                self.assertIn("COMMIT type(scope):", prompt)
+                self.assertIsNone(dump_file)
+                mock_set.assert_called_once()
 
     def test_perform_git_commit_standalone_success(self):
         from unittest.mock import patch, MagicMock

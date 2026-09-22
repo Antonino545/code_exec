@@ -889,13 +889,17 @@ class TerminalUI:
             self._tip("Paste (⌘V / Ctrl+V) into your AI chat to generate plan blocks."),
         ])
 
-    def commit_prompt_copied(self, prompt_len: int) -> None:
+    def commit_prompt_copied(self, prompt_len: int, file_path: Path | None = None) -> None:
         c = self.palette
-        self._card("Commit prompt copied", "ok", [
+        tip_text = "Diff is large! File copied to clipboard: paste (Cmd+V/Ctrl+V) directly into chat to attach." if file_path else "Paste (Cmd+V / Ctrl+V) into your AI chat to generate a COMMIT plan."
+        lines = [
             self._line("Git diff prompt copied to your clipboard.", c.WHITE, bold=True),
-            self._kv("Size", c.paint(f"{prompt_len} characters", c.WHITE)),
-            self._tip("Paste (⌘V / Ctrl+V) into your AI chat to generate a COMMIT plan."),
-        ])
+            self._kv("Size", c.paint(f"{prompt_len:,} characters", c.WHITE)),
+            self._tip(tip_text),
+        ]
+        if file_path:
+            lines.append(self._kv("File", c.paint(str(file_path), c.CYAN, bold=True)))
+        self._card("Commit prompt copied", "ok", lines)
 
     def prompt_commit(self, default_msg: str) -> bool:
         c = self.palette
@@ -935,11 +939,15 @@ class TerminalUI:
         c = self.palette
         token_str = f"~{tokens:,} tokens"
         noun = "file" if file_count == 1 else "files"
+        is_large = tokens > 18000
+        tip_text = "File copied to clipboard! Paste (Cmd+V/Ctrl+V) directly into chat to attach." if is_large else "Requested file content copied to clipboard. Paste into your AI chat."
         lines = [
             self._line(f"Loaded {file_count} requested {noun} ({total_lines} lines).", c.WHITE, bold=True),
             self._kv("Est. Tokens", c.paint(token_str, c.AMBER, bold=True)),
-            self._tip("Requested file content copied to clipboard. Paste into your AI chat."),
+            self._tip(tip_text),
         ]
+        if is_large:
+            lines.append(self._kv("File", c.paint("context/FETCHED_CONTEXT.md", c.CYAN, bold=True)))
         self._card("Context Fetched", "ok", lines)
 
     # ------------------------------------------------------------------ #
