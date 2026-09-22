@@ -28,6 +28,7 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 - `COMMIT type(scope): description`: last line, only after file changes.
 
 ## Block syntax: pick ONE style per block, never mix
+
 **Style A: keywords.** Both keywords are required, each with its own opener and closer.
 ```
 EDIT src/app.py
@@ -59,6 +60,28 @@ Delimiter rules:
 - Content must not contain a line that is only `>>`/`>>>`, `====`, or `<<<`. If it must, use a different block style or a longer fence.
 - Never leave a block open.
 
+## Anti-hallucination rules (read carefully — these prevent the most common errors)
+
+### SEARCH blocks
+- ❌ **NEVER write a SEARCH block from memory.** Always copy-paste the exact lines from the file content provided to you in context (or from a `+` line in a diff).
+- ❌ **NEVER paraphrase, re-indent, or re-format** lines in a SEARCH block — they must match the file verbatim.
+- ❌ **NEVER use generic single lines** (`pass`, `return`, `}`, `>`, bare HTML tags) as a SEARCH anchor — they appear in many places and will be ambiguous.
+- ✅ Use **3–6 unique lines** as an anchor. For larger regions (>20 lines), use the boundary anchor shorthand: only the **first 4 + last 4 lines** of the region.
+
+### File paths
+- ❌ **NEVER guess a file path.** Only use paths that explicitly appear in the file list or context provided.
+- ❌ **NEVER use absolute paths** (`/home/user/...`), home-relative paths (`~/...`), or `..` traversal.
+- ✅ Paths are always relative to the project root (`src/App.jsx`, `tests/test_foo.py`).
+- ✅ If a path seems wrong, ask the user to confirm before emitting the plan.
+
+### Single block rule
+- ❌ **NEVER emit more than one `code_exec` block** in a single reply. If you need to correct a mistake, merge all operations into ONE new block.
+- ❌ **NEVER put corrections as a second block** — that triggers `MULTIPLE_PLANS`.
+
+### Block content
+- ❌ **NEVER place prose, comments, or explanations inside the `code_exec` block.** Put them outside.
+- ❌ **NEVER mix block styles** (`SEARCH <<<` then `====`). Pick one style and use it throughout.
+
 ## Rules
 - Paths are project-relative (`src/App.jsx`). No `..`, absolute paths or `.git`. Never touch `.env*`, keys/certs, `.github/workflows/*`, `.gitlab-ci.yml`.
 - No contradictory ops on one file (double `CREATE`, edit after `DELETE`). Order operations so dependencies exist first.
@@ -70,7 +93,7 @@ Delimiter rules:
 
 ## Errors (a diagnostic is copied to the clipboard; fix it and resend the WHOLE plan)
 - `PLAN_NOT_FOUND`: no closed block, or output was cut off · `MULTIPLE_PLANS`: send exactly one block
-- `SEARCH_NOT_FOUND`: copy real lines from the file · `SEARCH_AMBIGUOUS`: add 1–3 context lines · `SEARCH_TOO_BIG`: shrink or use boundary anchors
+- `SEARCH_NOT_FOUND`: copy real lines from the file (look at `+` lines in the diff shown) · `SEARCH_AMBIGUOUS`: add 1–3 context lines · `SEARCH_TOO_BIG`: shrink or use boundary anchors
 - `CREATE_EXISTS`: use EDIT · `FILE_NOT_FOUND` / `DELETE_NOT_FOUND`: check the path or CREATE
 - `INVALID_PATH` / `FILE_PROTECTED`: don't modify · `CONFLICTING_OPERATIONS`: merge or reorder
 - `FORBIDDEN_COMMAND`: use an allowed `RUN` · `UNKNOWN_COMMAND`: bad name, or prose inside the block · `PATCH_FAILED`: fix hunk context

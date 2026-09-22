@@ -259,6 +259,10 @@ def _norm_path(raw: str) -> str:
         p = p.replace("\\", "/")
     while p.startswith("./"):
         p = p[2:]
+    if p.startswith("~/"):
+        # Home-relative paths are never valid in a project plan
+        _warn(f"home-relative path rejected (will fail as INVALID_PATH): {p}")
+        return p
     if p.startswith("/"):
         try:
             rel = Path(p).resolve().relative_to(Path.cwd().resolve())
@@ -266,6 +270,18 @@ def _norm_path(raw: str) -> str:
             return p  # leave it: the executor rejects it as INVALID_PATH
         _warn(f"absolute path made project-relative: {rel.as_posix()}")
         return rel.as_posix()
+
+    # Smart prefix recovery: if the path doesn't exist, try stripping a leading
+    # `src/`, `app/`, `lib/`, or `packages/` segment (common LLM hallucination).
+    from code_exec_types import ROOT as _ROOT
+    if not (_ROOT / p).exists():
+        parts = p.split("/", 1)
+        if len(parts) == 2 and parts[0] in {"src", "app", "lib", "packages", "source"}:
+            candidate = parts[1]
+            if (_ROOT / candidate).exists():
+                _warn(f"path prefix '{parts[0]}/' stripped (file found at '{candidate}')")
+                return candidate
+
     return p
 
 
@@ -540,6 +556,14 @@ def read_block(lines: list[str], i: int, inline_started: bool = False) -> tuple[
     while k < len(lines) and lines[k].strip() != "END_OF_FILE":
         k += 1
     if k >= len(lines):
+        # Missing END_OF_FILE: tolerate it if no further command follows (last block in plan)
+        has_later_cmd = any(_is_strict_command(ln) for ln in lines[i:])
+        if not has_later_cmd:
+            _warn(
+                f"Missing END_OF_FILE for block starting at line {i + 1}; "
+                "treating end of plan as implicit closer"
+            )
+            return "\n".join(lines[i:]), len(lines)
         raise ValueError(f"Missing END_OF_FILE for block starting at line {i + 1}")
     return "\n".join(lines[i:k]), k + 1
 
