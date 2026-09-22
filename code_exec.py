@@ -841,8 +841,70 @@ def perform_git_commit(message: str, paths: list[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _find_symbol_range(target_path: Path, content: str, symbol: str) -> tuple[int, int, str] | None:
+    """Finds start/end lines (1-indexed) and kind for a function or class symbol."""
+    suffix = target_path.suffix.lower()
+    clean_sym = symbol.strip()
+
+    # 1. Python AST resolution
+    if suffix == ".py":
+        import ast
+        try:
+            tree = ast.parse(content)
+            # Support Class.method or top-level symbol
+            parts = clean_sym.split(".")
+            if len(parts) == 1:
+                target_name = parts[0]
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        if node.name == target_name:
+                            kind = "class" if isinstance(node, ast.ClassDef) else "def"
+                            end = getattr(node, "end_lineno", node.lineno)
+                            return node.lineno, end, f"{kind} {node.name}"
+            elif len(parts) == 2:
+                cls_name, method_name = parts
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef) and node.name == cls_name:
+                        for sub in node.body:
+                            if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub.name == method_name:
+                                end = getattr(sub, "end_lineno", sub.lineno)
+                                return sub.lineno, end, f"{cls_name}.{sub.name}"
+        except Exception:
+            pass
+
+    # 2. General regex fallback for JS/TS/Python/etc.
+    lines = content.splitlines()
+    escaped = re.escape(clean_sym)
+    pattern = re.compile(rf"(?:def|function|class|const|let|var)\s+{escaped}\b|[bB]?{escaped}\s*=\s*(?:function|\()|class\s+{escaped}\b")
+    for idx, line in enumerate(lines):
+        if pattern.search(line):
+            start_lineno = idx + 1
+            # Determine end by looking at indentation or matching braces
+            base_indent = len(line) - len(line.lstrip())
+            end_lineno = start_lineno
+            brace_count = line.count("{") - line.count("}")
+            seen_open = "{" in line
+            for j in range(idx + 1, len(lines)):
+                next_line = lines[j]
+                if seen_open:
+                    brace_count += next_line.count("{") - next_line.count("}")
+                    end_lineno = j + 1
+                    if brace_count <= 0:
+                        break
+                else:
+                    if not next_line.strip():
+                        continue
+                    indent = len(next_line) - len(next_line.lstrip())
+                    if indent <= base_indent:
+                        break
+                    end_lineno = j + 1
+            return start_lineno, end_lineno, clean_sym
+
+    return None
+
+
 def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, int]:
-    """Reads requested files/ranges, formats them for AI context, and copies to clipboard."""
+    """Reads requested files/ranges/symbols, formats them for AI context, and copies to clipboard."""
     from code_exec_plan_export import estimate_tokens
     sections = [
         "## Requested File Context\n",
@@ -851,15 +913,15 @@ def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, 
     total_lines = 0
     for op in fetch_ops:
         path_str = op.args[0]
-        range_str = op.args[1] if len(op.args) > 1 and op.args[1] else None
+        spec_str = op.args[1] if len(op.args) > 1 and op.args[1] else None
         target_path = safe_path(path_str)
         if not target_path.is_file():
             raise OpError(f"ERR|FILE_NOT_FOUND|{path_str}")
         content = read_text(target_path)
         lines = content.splitlines()
         total_file_lines = len(lines)
-        if range_str:
-            m = re.match(r"^(\d+)(?:-(\d+))?$", range_str)
+        if spec_str:
+            m = re.match(r"^(\d+)(?:-(\d+))?$", spec_str)
             if m:
                 start = max(1, int(m.group(1)))
                 end = min(total_file_lines, int(m.group(2))) if m.group(2) else total_file_lines
@@ -870,9 +932,17 @@ def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, 
                 total_lines += len(selected_lines)
                 body = "\n".join(selected_lines)
             else:
-                header = f"### `{path_str}` (full file, {total_file_lines} lines)\n"
-                total_lines += total_file_lines
-                body = content
+                sym_match = _find_symbol_range(target_path, content, spec_str)
+                if sym_match:
+                    start, end, label = sym_match
+                    selected_lines = lines[start - 1 : end]
+                    header = f"### `{path_str}` ({label}, lines {start}-{end} of {total_file_lines})\n"
+                    total_lines += len(selected_lines)
+                    body = "\n".join(selected_lines)
+                else:
+                    header = f"### `{path_str}` (full file, symbol '{spec_str}' not located, {total_file_lines} lines)\n"
+                    total_lines += total_file_lines
+                    body = content
         else:
             header = f"### `{path_str}` (full file, {total_file_lines} lines)\n"
             total_lines += total_file_lines
