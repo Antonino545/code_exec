@@ -128,6 +128,7 @@ class Operation:
     args: tuple
     data: str | None = None
     extra: str | None = None
+    source_line: int = 0  # 1-based line number in the plan text; 0 = unknown
 
 
 def clean_path(raw: str) -> str:

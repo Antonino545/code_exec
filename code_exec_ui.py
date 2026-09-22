@@ -889,12 +889,43 @@ class TerminalUI:
             self._tip("Paste (⌘V / Ctrl+V) into your AI chat to generate plan blocks."),
         ])
 
-    def commit_prompt_copied(self, prompt_len: int, file_path: Path | None = None) -> None:
+    def repeated_error_file_attached(
+        self, filename: str, attempt: int, line_count: int, size_kb: float
+    ) -> None:
+        """Warn that the same file has failed N times and its full content was injected into the clipboard."""
+        c = self.palette
+        ordinal = {2: "2nd", 3: "3rd"}.get(attempt, f"{attempt}th")
+        lines = [
+            self._line(
+                f"The SEARCH block in {c.paint(filename, c.WHITE, bold=True)} has failed "
+                f"{c.paint(str(attempt) + ' times', c.RED, bold=True)} in a row.",
+                c.AMBER,
+            ),
+            self._line(
+                f"Full file content ({line_count} lines, {size_kb} KB) appended to clipboard prompt.",
+                c.WHITE,
+            ),
+            self._line(""),
+            self._kv("Action", c.paint("Read the attached file before writing any SEARCH block", c.CYAN)),
+            self._tip(
+                f"If your AI keeps failing, open {c.paint(filename, c.WHITE)} manually and paste the "
+                "relevant lines directly into the chat."
+            ),
+        ]
+        self._card(
+            f"⚠️  Repeated failure ({ordinal} attempt) — file attached",
+            "warn",
+            lines,
+            file=sys.stderr,
+        )
+
+    def commit_prompt_copied(self, prompt_len: int, tokens: int = 0, file_path: Path | None = None) -> None:
         c = self.palette
         tip_text = "Diff is large! File copied to clipboard: paste (Cmd+V/Ctrl+V) directly into chat to attach." if file_path else "Paste (Cmd+V / Ctrl+V) into your AI chat to generate a COMMIT plan."
+        token_str = f"~{tokens:,} tokens ({prompt_len:,} chars)" if tokens else f"{prompt_len:,} characters"
         lines = [
             self._line("Git diff prompt copied to your clipboard.", c.WHITE, bold=True),
-            self._kv("Size", c.paint(f"{prompt_len:,} characters", c.WHITE)),
+            self._kv("Est. Tokens", c.paint(token_str, c.AMBER, bold=True)),
             self._tip(tip_text),
         ]
         if file_path:

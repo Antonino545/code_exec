@@ -259,11 +259,12 @@ class TestResilienceAndSecurity(unittest.TestCase):
         fake_status = MagicMock(stdout="?? untracked_file.txt\n")
         with patch("subprocess.run", side_effect=[fake_diff, fake_status]):
             with patch("code_exec.set_clipboard") as mock_set:
-                prompt, dump_file = generate_commit_prompt()
+                prompt, tokens, dump_file = generate_commit_prompt()
                 self.assertIn("Generate a concise, scoped conventional commit message", prompt)
                 self.assertIn("+new_feature = True", prompt)
                 self.assertIn("untracked_file.txt", prompt)
                 self.assertIn("COMMIT type(scope):", prompt)
+                self.assertGreater(tokens, 0)
                 self.assertIsNone(dump_file)
                 mock_set.assert_called_once()
 

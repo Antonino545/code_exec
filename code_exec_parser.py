@@ -863,6 +863,7 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             raise OpError(f"line {lineno}: {exc}") from None
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
+        operation.source_line = lineno
         operations.append(operation)
 
         # Several SEARCH/REPLACE (or MARKER/CONTENT) pairs under one command become
@@ -877,7 +878,8 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
                 if nxt is None:
                     break
                 first, second, i = nxt
-                operations.append(Operation(operation.command, operation.args, first, second))
+                child = Operation(operation.command, operation.args, first, second, source_line=lineno)
+                operations.append(child)
                 extra += 1
             if extra:
                 warn(

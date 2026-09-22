@@ -95,6 +95,18 @@ class TestLazyContextAndFetch(unittest.TestCase):
         self.assertTrue(index_file.is_file())
         self.assertIn("Project Skeleton Index", index_file.read_text(encoding="utf-8"))
 
+    def test_context_folder_automatically_added_to_gitignore(self):
+        gitignore = self.scratch / ".gitignore"
+        gitignore.write_text("node_modules/\n", encoding="utf-8")
+        create_plan_folder(
+            root=self.scratch,
+            output_dirname="context",
+            export_all=True,
+        )
+        content = gitignore.read_text(encoding="utf-8")
+        self.assertIn("context/", content)
+        self.assertIn(".code_exec/", content)
+
     def test_cli_fetch_action(self):
         rel_path = f"_test_scratch_fetch/sample.py:2-4"
         with patch("code_exec.set_clipboard"):
