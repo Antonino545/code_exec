@@ -548,7 +548,7 @@ class TerminalUI:
     def open_web_guide(self) -> None:
         import webbrowser
         c = self.palette
-        url = "https://github.com/antonino54/code_exec#readme"
+        url = "https://github.com/Antonino545/code_exec/blob/main/GUIDE.md"
         lines = [
             self._line("Opening online documentation & guide in your browser...", c.WHITE, bold=True),
             self._kv("URL", c.paint(url, c.CYAN, bold=True)),
