@@ -69,6 +69,7 @@ from code_exec_matcher import (
     _normalize_jsx_line,
     _strip_symbols_and_emojis,
     apply_unified_patch,
+    find_all,
     find_unique,
     parse_unified_diff,
 )
@@ -113,7 +114,7 @@ _error_history: dict[tuple[str, str], int] = {}
 # Operation execution
 # ============================================================
 
-def execute(op: Operation, fs) -> str | None:
+def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
     command = op.command
     args = op.args
 
@@ -146,7 +147,14 @@ def execute(op: Operation, fs) -> str | None:
         newline = newline_style(doc)
 
         if command == "EDIT":
-            match = find_unique(doc, with_newlines(op.data, newline), "SEARCH", args[0])
+            # Reuse the MatchResult from preflight if available (avoids double scanning)
+            cache_key = id(op)
+            if _match_cache is not None and cache_key in _match_cache:
+                match = _match_cache[cache_key]
+            else:
+                match = find_unique(doc, with_newlines(op.data, newline), "SEARCH", args[0])
+                if _match_cache is not None:
+                    _match_cache[cache_key] = match
             replacement = with_newlines(op.extra, newline)
 
             # Auto-align indentation if matching occurred under indentation drift
@@ -158,7 +166,13 @@ def execute(op: Operation, fs) -> str | None:
             done = "Edited"
 
         elif command in {"INSERT_BEFORE", "INSERT_AFTER"}:
-            match = find_unique(doc, with_newlines(op.data, newline), "MARKER", args[0])
+            cache_key = id(op)
+            if _match_cache is not None and cache_key in _match_cache:
+                match = _match_cache[cache_key]
+            else:
+                match = find_unique(doc, with_newlines(op.data, newline), "MARKER", args[0])
+                if _match_cache is not None:
+                    _match_cache[cache_key] = match
             content = with_newlines(op.extra, newline)
 
             if match.fuzzy and match.line_range is not None:
@@ -192,12 +206,13 @@ def execute(op: Operation, fs) -> str | None:
             content = with_newlines(op.data, newline)
             if not content.endswith(newline):
                 content += newline
-            new = bom + content + doc[len(bom) :]
+            new = bom + content + doc[len(bom):]
             note = ""
             done = "Prepended to"
 
         fs.write(path, new)
         return f"{done} {args[0]}{note}"
+
     if command == "REPLACE_ALL":
         path = safe_path(args[0])
         if not fs.is_file(path):
@@ -208,12 +223,15 @@ def execute(op: Operation, fs) -> str | None:
         replace = with_newlines(op.extra, newline)
         if not search:
             raise OpError(f"SEARCH block is empty for REPLACE_ALL in {args[0]}")
-        count = doc.count(search)
-        if count == 0:
-            raise OpError(f"ERR|SEARCH_NOT_FOUND|{args[0]} - pattern not found for REPLACE_ALL")
-        new = doc.replace(search, replace)
+        # Use the smart multi-tier matcher so trailing-whitespace / indent drift is tolerated
+        spans = find_all(doc, search, args[0])  # returns spans in reverse (right-to-left) order
+        count = len(spans)
+        new = doc
+        for start, end in spans:
+            new = new[:start] + replace + new[end:]
         fs.write(path, new)
         return f"Replaced {count} occurrence(s) in {args[0]}"
+
     if command == "TOUCH":
         path = safe_path(args[0], follow_leaf=False)
         fs.touch(path)
@@ -431,10 +449,21 @@ def generate_plan_diff(operations: list[Operation]) -> str:
     return "".join(diff_lines)
 
 
-def preflight(operations: list[Operation]) -> tuple[str | None, int]:
+def preflight(operations: list[Operation]) -> tuple[str | None, int, dict]:
+    """
+    Validate and dry-run the operation list.
+
+    Returns (deferred_reason, deferred_count, match_cache).
+    match_cache maps id(op) -> MatchResult for EDIT/INSERT ops so apply_plan
+    can skip the second find_unique() scan (avoids running the 7-tier matcher twice).
+    """
     vfs = VirtualFS()
     reason = None
     trigger = 0
+    match_cache: dict = {}
+
+    def _loc(op: Operation) -> str:
+        return f" [plan line {op.source_line}]" if op.source_line else ""
 
     # Phase 1: Static Consistency & Conflict Verification
     file_history: dict[str, list[str]] = {}
@@ -447,13 +476,13 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
                 path_str = str(safe_path(path_arg, follow_leaf=False))
                 history = file_history.setdefault(path_str, [])
                 if op.command == "CREATE" and "CREATE" in history:
-                    raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
+                    raise OpError(f"Operation {number} ({describe_operation(op)}){_loc(op)}: ERR|CONFLICTING_OPERATIONS|{path_arg} - multiple CREATE commands for same file")
                 if op.command in {"EDIT", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "CHMOD", "PATCH"}:
                     if "DELETE" in history:
-                        raise OpError(f"Operation {number} ({describe_operation(op)}): ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to operate on a file that was DELETED in the same plan")
+                        raise OpError(f"Operation {number} ({describe_operation(op)}){_loc(op)}: ERR|CONFLICTING_OPERATIONS|{path_arg} - attempting to operate on a file that was DELETED in the same plan")
                 history.append(op.command)
 
-    # Phase 2: Virtual Simulation
+    # Phase 2: Virtual Simulation — also builds the match_cache
     for number, op in enumerate(operations, 1):
         try:
             if reason is not None:
@@ -462,15 +491,15 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int]:
                 reason, trigger = "a RUN command", number
             else:
                 try:
-                    execute(op, vfs)
+                    execute(op, vfs, _match_cache=match_cache)
                 except Unverifiable as exc:
                     reason, trigger = str(exc), number
         except OpError as exc:
             raise OpError(
-                f"Operation {number} ({describe_operation(op)}): {exc}"
+                f"Operation {number} ({describe_operation(op)}){_loc(op)}: {exc}"
             ) from None
 
-    return reason, (len(operations) - trigger if reason else 0)
+    return reason, (len(operations) - trigger if reason else 0), match_cache
 
 
 # ============================================================
@@ -875,7 +904,7 @@ def handle_fetch_operations(fetch_ops: list[Operation]) -> tuple[str, int, int, 
     return result_text, len(fetch_ops), total_lines, tokens
 
 
-def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False) -> int:
+def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False, match_cache: dict | None = None) -> int:
     fetch_ops = [op for op in operations if op.command == "FETCH"]
     exec_ops = [op for op in operations if op.command not in {"COMMIT", "FETCH"}]
 
@@ -900,6 +929,9 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
     ui.start_apply(len(exec_ops))
     modified_paths: list[str] = []
 
+    def _loc(op: Operation) -> str:
+        return f" [plan line {op.source_line}]" if op.source_line else ""
+
     try:
         step = 0
         for op in operations:
@@ -907,10 +939,10 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 continue
             step += 1
             try:
-                message = execute(op, fs)
+                message = execute(op, fs, _match_cache=match_cache)
             except OpError as exc:
                 raise type(exc)(
-                    f"Operation {step} ({describe_operation(op)}): {exc}"
+                    f"Operation {step} ({describe_operation(op)}){_loc(op)}: {exc}"
                 ) from None
             if message:
                 ui.step_done(step, len(exec_ops), message)
@@ -1259,7 +1291,7 @@ def main(argv=None) -> int:
         _matcher_mod.VERBOSE = True
 
     try:
-        reason, deferred = preflight(operations)
+        reason, deferred, match_cache = preflight(operations)
     except OpError as exc:
         return fail(f"Validation failed: {exc}\n\nNo files were modified.")
 
@@ -1274,7 +1306,7 @@ def main(argv=None) -> int:
         ui.show_diff(diff_text)
 
     if args.dry_run:
-        return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True)
+        return apply_plan(operations, args.timeout, no_commit=True, auto_commit=True, dry_run=True, match_cache=match_cache)
 
     is_pure_fetch = all(op.command == "FETCH" for op in operations)
     if not args.yes and not is_pure_fetch:
@@ -1282,7 +1314,7 @@ def main(argv=None) -> int:
             ui.cancelled()
             return 0
 
-    return apply_plan(operations, args.timeout, no_commit=args.no_commit, auto_commit=args.yes)
+    return apply_plan(operations, args.timeout, no_commit=args.no_commit, auto_commit=args.yes, match_cache=match_cache)
 
 
 if __name__ == "__main__":

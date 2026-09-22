@@ -350,6 +350,73 @@ def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
         return _find_unique_impl(doc, needle, what, target)
 
 
+def find_all(doc: str, needle: str, target: str) -> list[tuple[int, int]]:
+    """
+    Find ALL non-overlapping occurrences of needle in doc using the same
+    tolerance tiers as find_unique (trailing whitespace, indentation, whitespace
+    collapse, JSX normalization).  Returns spans as (start, end) byte offsets
+    sorted in REVERSE order (right-to-left) so callers can splice without offset drift.
+
+    Raises OpError if no match is found at any tier.
+    """
+    if not needle:
+        raise OpError("SEARCH block is empty")
+
+    want_raw = needle.split("\n")
+    while want_raw and not want_raw[0].strip():
+        want_raw.pop(0)
+    while want_raw and not want_raw[-1].strip():
+        want_raw.pop()
+    if not want_raw:
+        raise OpError("SEARCH block is empty")
+
+    capture_nl = needle.endswith("\n")
+    doc_lines = doc.split("\n")
+
+    def _spans_to_offsets(spans):
+        return [(s, e) for s, e, _, _ in spans]
+
+    # Tier 1: exact
+    if doc.count(needle) > 0:
+        offsets = []
+        start_idx = 0
+        while True:
+            pos = doc.find(needle, start_idx)
+            if pos == -1:
+                break
+            offsets.append((pos, pos + len(needle)))
+            start_idx = pos + len(needle)
+        return list(reversed(offsets))
+
+    # Tier 2: trailing whitespace
+    want2 = [ln.rstrip("\r ") for ln in want_raw]
+    spans = _match_line_spans(doc_lines, want2, mode="trailing", capture_newline=capture_nl)
+    if spans:
+        return list(reversed(_spans_to_offsets(spans)))
+
+    # Tier 3: indentation
+    want3 = [ln.strip() for ln in want_raw]
+    spans = _match_line_spans(doc_lines, want3, mode="indent", capture_newline=capture_nl)
+    if spans:
+        return list(reversed(_spans_to_offsets(spans)))
+
+    # Tier 4: whitespace collapse
+    want4 = [re.sub(r"[ \t]+", " ", ln.strip()) for ln in want_raw]
+    spans = _match_line_spans(doc_lines, want4, mode="whitespace", capture_newline=capture_nl)
+    if spans:
+        return list(reversed(_spans_to_offsets(spans)))
+
+    # Tier 5: JSX normalization
+    want5 = [_normalize_jsx_line(ln) for ln in want_raw]
+    spans = _match_line_spans(doc_lines, want5, mode="jsx", capture_newline=capture_nl)
+    if spans:
+        return list(reversed(_spans_to_offsets(spans)))
+
+    first = next((ln.strip() for ln in needle.split("\n") if ln.strip()), "")
+    preview = first if len(first) <= 60 else first[:57] + "..."
+    raise OpError(f"ERR|SEARCH_NOT_FOUND|{target} (REPLACE_ALL, first line: {preview!r})")
+
+
 def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness.

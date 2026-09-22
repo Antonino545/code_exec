@@ -613,7 +613,7 @@ class TestVerboseCLIFlag(unittest.TestCase):
                     with patch("code_exec_ui.ui") as mock_ui:
                         # The plan will fail (file doesn't exist), but VERBOSE should have been set
                         # before preflight runs. We patch preflight to check.
-                        with patch("code_exec.preflight", return_value=(None, 0)) as mock_pf:
+                        with patch("code_exec.preflight", return_value=(None, 0, {})) as mock_pf:
                             with patch("code_exec.apply_plan", return_value=0):
                                 with patch("code_exec_ui.ui.confirm", return_value=True):
                                     with patch("code_exec_ui.ui.header"):
