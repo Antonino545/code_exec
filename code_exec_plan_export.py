@@ -343,6 +343,35 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
     return "\n".join(head + sep + tail) + "\n"
 
 
+def ensure_gitignore_entry(root: Path, entry: str) -> bool:
+    """Ensures an entry (e.g. 'context/') is present in the project's .gitignore."""
+    gitignore_path = root / ".gitignore"
+    clean_entry = entry.strip()
+    clean_dir = clean_entry.rstrip("/") + "/"
+    entry_variants = {clean_entry, clean_dir, "/" + clean_entry, "/" + clean_dir}
+
+    if gitignore_path.is_file():
+        try:
+            content = gitignore_path.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                if line.strip() in entry_variants:
+                    return False  # Already present
+            # Append entry cleanly
+            delimiter = "" if content.endswith("\n") or not content else "\n"
+            gitignore_path.write_text(f"{content}{delimiter}{clean_dir}\n", encoding="utf-8")
+            return True
+        except OSError:
+            return False
+    elif (root / ".git").exists():
+        # Git repository exists but no .gitignore yet: create one
+        try:
+            gitignore_path.write_text(f"{clean_dir}\n", encoding="utf-8")
+            return True
+        except OSError:
+            return False
+    return False
+
+
 def create_plan_folder(
     plan_text: str | None = None,
     output_dirname: str = "context",
@@ -359,6 +388,10 @@ def create_plan_folder(
     if root is None:
         root = Path.cwd().resolve()
     target_dir = root / output_dirname
+
+    # Automatically ensure the context folder is ignored in git
+    ensure_gitignore_entry(root, output_dirname)
+
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
     # 1. Immediately wipe any existing context folder first to avoid scanning old exports
