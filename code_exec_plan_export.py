@@ -344,11 +344,12 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
 
 
 def ensure_gitignore_entry(root: Path, entry: str) -> bool:
-    """Ensures an entry (e.g. 'context/') is present in the project's .gitignore."""
+    """Ensures an entry (e.g. 'context/' or 'PROJECT_CONTEXT.md') is present in the project's .gitignore."""
     gitignore_path = root / ".gitignore"
     clean_entry = entry.strip()
-    clean_dir = clean_entry.rstrip("/") + "/"
-    entry_variants = {clean_entry, clean_dir, "/" + clean_entry, "/" + clean_dir}
+    is_file = clean_entry.endswith(".md") or (root / clean_entry).is_file()
+    clean_formatted = clean_entry.rstrip("/") if is_file else (clean_entry.rstrip("/") + "/")
+    entry_variants = {clean_entry, clean_formatted, "/" + clean_entry, "/" + clean_formatted}
 
     if gitignore_path.is_file():
         try:
@@ -358,14 +359,14 @@ def ensure_gitignore_entry(root: Path, entry: str) -> bool:
                     return False  # Already present
             # Append entry cleanly
             delimiter = "" if content.endswith("\n") or not content else "\n"
-            gitignore_path.write_text(f"{content}{delimiter}{clean_dir}\n", encoding="utf-8")
+            gitignore_path.write_text(f"{content}{delimiter}{clean_formatted}\n", encoding="utf-8")
             return True
         except OSError:
             return False
     elif (root / ".git").exists():
         # Git repository exists but no .gitignore yet: create one
         try:
-            gitignore_path.write_text(f"{clean_dir}\n", encoding="utf-8")
+            gitignore_path.write_text(f"{clean_formatted}\n", encoding="utf-8")
             return True
         except OSError:
             return False
@@ -395,9 +396,15 @@ def create_plan_folder(
 
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
-    # 1. Immediately wipe any existing context folder first to avoid scanning old exports
+    # 1. Immediately wipe any existing context folder and bundle file first to avoid scanning old exports
     if target_dir.exists():
         shutil.rmtree(target_dir, ignore_errors=True)
+    stale_bundle = root / "PROJECT_CONTEXT.md"
+    if stale_bundle.exists():
+        try:
+            stale_bundle.unlink()
+        except OSError:
+            pass
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Collect candidate files from clean workspace
@@ -498,3 +505,135 @@ def create_plan_folder(
         "ignore_file": used_ignore,
         "compact": compact,
     }
+
+
+def create_plan_bundle(
+    plan_text: str | None = None,
+    output_file: str = "PROJECT_CONTEXT.md",
+    ignore_filename: str | None = ".code-exec-ignore",
+    root: Path | None = None,
+    export_all: bool = True,
+    compact: bool = True,
+) -> dict[str, int | str | bool]:
+    """
+    Creates a single consolidated markdown bundle (PROJECT_CONTEXT.md) containing
+    a directory outline, compact file skeletons, and AI instructions.
+    Ideal for single-file drag-and-drop into chat LLMs (Claude, ChatGPT, etc.).
+    """
+    if root is None:
+        root = Path.cwd().resolve()
+    target_path = root / output_file
+
+    ensure_gitignore_entry(root, ".code_exec")
+    ensure_gitignore_entry(root, output_file)
+
+    patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
+
+    # 1. Immediately wipe any existing context folder and target bundle file to avoid scanning old exports
+    context_dir = root / "context"
+    if context_dir.exists():
+        shutil.rmtree(context_dir, ignore_errors=True)
+    if target_path.exists():
+        try:
+            target_path.unlink()
+        except OSError:
+            pass
+
+    # 2. Collect candidate files from clean workspace
+    candidate_files: list[Path] = []
+    requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
+
+    if requested_paths:
+        for p_str in requested_paths:
+            p = root / p_str
+            if p.is_file():
+                candidate_files.append(p)
+            elif p.is_dir():
+                for sub in p.rglob("*"):
+                    if sub.is_file():
+                        candidate_files.append(sub)
+
+        for manifest in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "README.md"):
+            m_path = root / manifest
+            if m_path.is_file() and m_path not in candidate_files:
+                candidate_files.append(m_path)
+    else:
+        for p in root.rglob("*"):
+            try:
+                if p.resolve() == target_path.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                pass
+            if p.is_file():
+                candidate_files.append(p)
+
+    included_files: list[Path] = []
+    ignored_count = 0
+
+    for file_path in candidate_files:
+        try:
+            rel_path = file_path.relative_to(root)
+        except ValueError:
+            continue
+
+        if is_path_ignored(rel_path, is_dir=False, patterns=patterns):
+            ignored_count += 1
+            continue
+
+        included_files.append(file_path)
+
+    included_files.sort(key=lambda p: p.relative_to(root).as_posix())
+
+    bundle_sections = [
+        f"# Project Context: {root.name}",
+        "",
+        "> Auto-generated by `code-exec export-context --bundle`.",
+        "> When generating code changes, respond with a single fenced ````code_exec```` block.",
+        "",
+        "## File Index",
+        "",
+        "| Path | Mode |",
+        "| :--- | :--- |",
+    ]
+
+    for fp in included_files:
+        rel_posix = fp.relative_to(root).as_posix()
+        mode_str = "Skeleton" if compact else "Full"
+        bundle_sections.append(f"| `{rel_posix}` | {mode_str} |")
+
+    bundle_sections.append("")
+    bundle_sections.append("---")
+    bundle_sections.append("")
+
+    for fp in included_files:
+        rel_posix = fp.relative_to(root).as_posix()
+        if compact:
+            body = generate_skeleton(fp)
+        else:
+            try:
+                body = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                body = ""
+
+        fence = "```"
+        ext = fp.suffix.lstrip(".").lower() or "text"
+        bundle_sections.append(f"### File: `{rel_posix}`")
+        bundle_sections.append(f"{fence}{ext}\n{body}\n{fence}")
+        bundle_sections.append("")
+
+    content = "\n".join(bundle_sections)
+    target_path.write_text(content, encoding="utf-8")
+    total_tokens = estimate_tokens(content)
+    total_bytes = len(content.encode("utf-8"))
+
+    return {
+        "location": output_file,
+        "included": len(included_files),
+        "ignored": ignored_count,
+        "tokens": total_tokens,
+        "size_kb": round(total_bytes / 1024, 1),
+        "ignore_file": used_ignore,
+        "compact": compact,
+        "bundle": True,
+    }
+

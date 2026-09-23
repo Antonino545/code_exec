@@ -7,3 +7,4 @@ build/
 dist/
 .code_exec/
 context/
+PROJECT_CONTEXT.md

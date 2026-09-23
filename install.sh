@@ -24,8 +24,8 @@ PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.versi
 PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
 PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
 
-if [ "$PY_MAJOR" -lt 3 ] || [ "$PY_MAJOR" -eq 3 -a "$PY_MINOR" -lt 8 ]; then
-    echo -e "${RED}Error: Python 3.8+ is required (found $PY_VERSION).${RESET}" >&2
+if [ "$PY_MAJOR" -lt 3 ] || [ "$PY_MAJOR" -eq 3 -a "$PY_MINOR" -lt 9 ]; then
+    echo -e "${RED}Error: Python 3.9+ is required (found $PY_VERSION).${RESET}" >&2
     exit 1
 fi
 

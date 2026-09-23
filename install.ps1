@@ -9,7 +9,7 @@ if (-not $pythonCmd) {
 }
 
 if (-not $pythonCmd) {
-    Write-Error "Python 3 is not found in your PATH. Please install Python 3.8+ from https://python.org"
+    Write-Error "Python 3 is not found in your PATH. Please install Python 3.9+ from https://python.org"
     exit 1
 }
 
@@ -37,9 +37,10 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
+$pyExe = if ($pythonCmd -and $pythonCmd.Source) { $pythonCmd.Source } else { "python" }
 $cmdScript = @"
 @echo off
-python "$installDir\code_exec.py" %*
+"$pyExe" "$installDir\code_exec.py" %*
 "@
 
 $cmdPath = Join-Path $binDir "code-exec.cmd"

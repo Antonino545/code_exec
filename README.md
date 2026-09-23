@@ -10,7 +10,7 @@ A deterministic, atomic local code executor and guardrailed runtime designed for
 | |  | | | | | | |  _|   |  _|  \  /|  _| | |   
 | |__| |_| | |_| | |___  | |___ /  \| |___| |___
  \____\___/|____/|_____| |_____/_/\_\_____|\____|
-  Local Deterministic Coding Agent  v1.2
+  Local Deterministic Coding Agent  v1.3
 ```
 
 ---
@@ -111,7 +111,9 @@ code-exec undo
 
 # Copy git diff prompt to clipboard for AI commit generation
 code-exec -c
-# Or alias: code-exec docommit
+# Export single-file context bundle (auto-copies to clipboard!)
+code-exec bundle
+# Or short flag: code-exec -b
 
 # Validate plan without touching files
 code-exec --dry-run

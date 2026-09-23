@@ -447,6 +447,12 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 execute(op, vfs)
             except Exception:
                 pass
+        elif cmd == "COPY":
+            diff_lines.append(f"--- /dev/null\n+++ b/{op.args[1]}\n@@ copy from {op.args[0]} @@\n")
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
     return "".join(diff_lines)
 
 
@@ -472,7 +478,13 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int, dict]:
         if op.command == "RUN":
             validate_run_command(op.args[0])
         elif op.command not in {"RUN", "COMMIT"}:
-            args_to_check = (op.args[0],) if op.command in {"FETCH", "CHMOD"} else op.args
+            args_to_check = []
+            for idx, path_arg in enumerate(op.args):
+                if op.command in {"FETCH", "CHMOD"} and idx > 0:
+                    continue
+                if idx == 0 and op.command in {"MOVE", "COPY"} and (any(ch in path_arg for ch in ("*", "?", "[")) or path_arg.startswith("regex:")):
+                    continue
+                args_to_check.append(path_arg)
             for path_arg in args_to_check:
                 path_str = str(safe_path(path_arg, follow_leaf=False))
                 history = file_history.setdefault(path_str, [])
@@ -1038,7 +1050,6 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
     commit_op = next((op for op in operations if op.command == "COMMIT"), None)
     commit_msg = commit_op.args[0] if commit_op else None
     ui.start_apply(len(exec_ops))
-    ui.start_apply(len(exec_ops))
     modified_paths: list[str] = []
 
     def _loc(op: Operation) -> str:
@@ -1061,7 +1072,10 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH", "MKDIR"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
-                    modified_paths.extend([op.args[0], op.args[1]])
+                    src_arg = op.args[0]
+                    if not (any(ch in src_arg for ch in ("*", "?", "[")) or src_arg.startswith("regex:")):
+                        modified_paths.append(src_arg)
+                    modified_paths.append(op.args[1])
 
     except CommandFailed as exc:
         copy_error_to_clipboard(str(exc))
@@ -1131,6 +1145,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
 
 def main(argv=None) -> int:
+    global ROOT
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
@@ -1189,11 +1204,35 @@ def main(argv=None) -> int:
                         help="Show which matching tier was used for each SEARCH block")
     parser.add_argument("--short", action="store_true",
                         help="With -p: copy the compact instructions (for small/local models)")
+    parser.add_argument("-V", "--version", action="store_true",
+                        help="Show program's version number and exit")
+    parser.add_argument("-C", "--project-dir", dest="project_dir", default=None,
+                        help="Run as if code-exec was started in <path> instead of the current working directory")
+    parser.add_argument("-b", "--bundle", "--single-file", dest="bundle", action="store_true",
+                        help="Export a single consolidated markdown bundle (PROJECT_CONTEXT.md) and copy to clipboard")
+    parser.add_argument("--full", action="store_true",
+                        help="Export full file contents in bundle instead of default compact skeletons")
     parser.add_argument("--verify", nargs="?", const="auto", default=None, metavar="CMD",
                         help="Run a verification command after applying (e.g. 'pytest'). "
                              "Pass 'auto' or omit the value to auto-detect from .code-exec-verify "
                              "or project type (package.json → npm test, etc.)")
     args = parser.parse_args(argv)
+
+    if args.version:
+        print("code-exec 1.3.0")
+        return 0
+
+    if args.project_dir:
+        target_root = Path(args.project_dir).resolve()
+        if not target_root.is_dir():
+            return fail(f"Specified project directory does not exist: {args.project_dir}")
+        os.chdir(target_root)
+        import code_exec_types
+        import code_exec_fs
+        code_exec_types.ROOT = target_root
+        code_exec_fs.ROOT = target_root
+        code_exec_fs.BACKUP_ROOT = target_root / ".code_exec" / "backups"
+        ROOT = target_root
 
     if args.action in {"1", "apply"}:
         args.action = "apply"
@@ -1224,7 +1263,23 @@ def main(argv=None) -> int:
     elif args.action in {"7", "commit-prompt", "docommit", "commit"}:
         args.commit_prompt = True
         args.action = None
-    elif args.action in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
+    elif args.action in {
+        "8",
+        "bundle",
+        "b",
+        "pack",
+        "outline",
+        "digest",
+        "export-bundle",
+        "export-context",
+        "export-concet",
+        "context",
+        "export-plan",
+        "plan-export",
+        "plan-only",
+    }:
+        if args.action in {"b", "bundle", "pack", "outline", "digest", "export-bundle"}:
+            args.bundle = True
         args.export_plan = True
         args.action = None
     elif args.action in {"fetch", "get", "read"}:
@@ -1284,6 +1339,7 @@ def main(argv=None) -> int:
         args.no_run,
         args.no_commit,
         args.export_plan,
+        args.bundle,
     ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
@@ -1314,6 +1370,20 @@ def main(argv=None) -> int:
             args.commit_prompt = True
         elif choice in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
             args.export_plan = True
+        elif choice in {"b", "bundle", "pack", "outline", "digest"}:
+            args.export_plan = True
+            args.bundle = True
+        elif choice in {"9", "short-prompt"}:
+            args.prompt = True
+            args.short = True
+        elif choice in {"t", "theme", "themes"}:
+            themes = list(ui.palette.themes.keys())
+            curr = ui.palette.current_theme
+            idx = (themes.index(curr) + 1) % len(themes)
+            next_t = themes[idx]
+            ui.palette.set_theme(next_t)
+            print(f"\n  ✨ Theme switched to '{next_t}'!\n")
+            return 0
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
@@ -1323,16 +1393,52 @@ def main(argv=None) -> int:
         return 0
 
     if args.export_plan:
-        from code_exec_plan_export import create_plan_folder
+        from code_exec_plan_export import create_plan_folder, create_plan_bundle
         try:
-            target_out = args.target_dir or "context"
-            res = create_plan_folder(
-                export_all=True,
-                output_dirname=target_out,
-                ignore_filename=args.ignore_file,
-                root=Path.cwd().resolve(),
-                compact=args.compact,
-            )
+            copied_clip = False
+            bundle_file_path = None
+            if getattr(args, "bundle", False):
+                bundle_file = "PROJECT_CONTEXT.md"
+                compact_mode = not getattr(args, "full", False)
+                res = create_plan_bundle(
+                    export_all=True,
+                    output_file=bundle_file,
+                    ignore_filename=args.ignore_file,
+                    root=Path.cwd().resolve(),
+                    compact=compact_mode,
+                )
+                try:
+                    bundle_path = Path.cwd().resolve() / bundle_file
+                    if bundle_path.is_file():
+                        tokens = int(res.get("tokens", 0))
+                        MAX_CLIPBOARD_TOKENS = 18000
+                        MAX_CLIPBOARD_BYTES = 75 * 1024
+                        file_bytes = bundle_path.stat().st_size
+                        # If file is too large (like commit diff / fetched context), place file in clipboard
+                        if tokens > MAX_CLIPBOARD_TOKENS or file_bytes > MAX_CLIPBOARD_BYTES:
+                            copied_file = set_clipboard_file(bundle_path)
+                            if copied_file:
+                                bundle_file_path = bundle_path
+                                copied_clip = True
+                            else:
+                                set_clipboard(bundle_path.read_text(encoding="utf-8"))
+                                copied_clip = True
+                        else:
+                            # Small file: place both file object and full text
+                            set_clipboard_file(bundle_path)
+                            set_clipboard(bundle_path.read_text(encoding="utf-8"))
+                            copied_clip = True
+                except Exception:
+                    pass
+            else:
+                target_out = args.target_dir or "context"
+                res = create_plan_folder(
+                    export_all=True,
+                    output_dirname=target_out,
+                    ignore_filename=args.ignore_file,
+                    root=Path.cwd().resolve(),
+                    compact=args.compact,
+                )
             ui.plan_export_success(
                 location=str(res["location"]),
                 included=int(res["included"]),
@@ -1341,10 +1447,12 @@ def main(argv=None) -> int:
                 tokens=int(res.get("tokens", 0)),
                 size_kb=float(res.get("size_kb", 0.0)),
                 compact=bool(res.get("compact", False)),
+                copied_to_clipboard=copied_clip,
+                file_path=bundle_file_path,
             )
             return 0
         except Exception as exc:
-            return fail(f"Could not export context folder: {exc}")
+            return fail(f"Could not export context: {exc}")
 
     if args.commit_prompt:
         try:
@@ -1355,7 +1463,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.prompt:
-        instructions_path = Path(__file__).resolve().parent / "code_exec_instructions.md"
+        filename = "code_exec_instructions_short.md" if getattr(args, "short", False) else "code_exec_instructions.md"
+        instructions_path = Path(__file__).resolve().parent / filename
         if not instructions_path.is_file():
             return fail(f"Instructions file not found: {instructions_path.name} (checked {instructions_path.parent})")
         try:
@@ -1393,8 +1502,8 @@ def main(argv=None) -> int:
 
     if args.timeout < 0:
         parser.error("--timeout must be >= 0")
-    if args.file == "-" and not (args.yes or args.dry_run):
-        return fail("Reading the plan from stdin requires --yes or --dry-run "
+    if args.file == "-" and not (args.yes or args.dry_run or args.check):
+        return fail("Reading the plan from stdin requires --yes, --dry-run, or --check "
                     "(stdin can't be used for the confirmation prompt).")
 
     try:

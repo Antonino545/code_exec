@@ -199,13 +199,17 @@ def set_clipboard_file(path: Path) -> bool:
 
     if sys.platform == "darwin":
         # AppleScript sets the NSPasteboard file promise / POSIX file
-        script = f'tell app "Finder" to set the clipboard to (POSIX file "{abs_path.as_posix()}")'
-        try:
-            res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
-            if res.returncode == 0:
-                return True
-        except (OSError, subprocess.SubprocessError):
-            pass
+        scripts = [
+            f'set the clipboard to (POSIX file "{abs_path.as_posix()}")',
+            f'tell app "Finder" to set the clipboard to (POSIX file "{abs_path.as_posix()}")',
+        ]
+        for script in scripts:
+            try:
+                res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+                if res.returncode == 0:
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                continue
 
     elif sys.platform.startswith("linux"):
         # Set text/uri-list so file managers and browsers accept it as an attached file
@@ -307,6 +311,8 @@ def _normalize(text: str) -> str:
 def _norm_path(raw: str) -> str:
     """`**./src\\a.js**` -> `src/a.js`; absolute paths inside the project become relative."""
     p = raw.strip().strip("*`'\"").strip()
+    if p.startswith("regex:"):
+        return p
     if "\\" in p and "/" not in p:
         p = p.replace("\\", "/")
     while p.startswith("./"):

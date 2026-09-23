@@ -29,8 +29,13 @@ py-modules = [
     "code_exec_fs",
     "code_exec_matcher",
     "code_exec_parser",
+    "code_exec_plan_export",
     "code_exec_sandbox",
     "code_exec_types",
     "code_exec_ui",
     "code_exec_updater",
 ]
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]
+
