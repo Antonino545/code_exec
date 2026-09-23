@@ -34,6 +34,8 @@ py-modules = [
     "code_exec_types",
     "code_exec_ui",
     "code_exec_updater",
+    "code_exec_completions",
+    "code_exec_watch",
 ]
 
 [tool.setuptools.package-data]

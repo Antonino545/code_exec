@@ -103,6 +103,13 @@ You can bypass the menu for instant automation:
 # Apply plan directly from clipboard
 code-exec apply
 
+# Clipboard Watch Mode: listen in background and prompt whenever AI reply is copied!
+code-exec watch
+# Or short flag: code-exec -w
+
+# Install shell autocompletions for active shell (Zsh, Bash, Fish)
+code-exec --install-completions
+
 # Inspect proposed unified diff before execution
 code-exec apply --diff
 
@@ -111,7 +118,8 @@ code-exec undo
 
 # Copy git diff prompt to clipboard for AI commit generation
 code-exec -c
-# Export single-file context bundle (auto-copies to clipboard!)
+
+# Export single-file compact context bundle (auto-copies to clipboard!)
 code-exec bundle
 # Or short flag: code-exec -b
 

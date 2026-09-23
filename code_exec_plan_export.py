@@ -218,6 +218,341 @@ def estimate_tokens(text: str) -> int:
     return max(words, int(chars / 3.8))
 
 
+def _extract_go_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+    in_import_block = False
+    in_const_var_block = False
+    import_count = 0
+
+    fn_pattern = re.compile(r"^func\s+(?:\([^)]+\)\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)")
+    type_pattern = re.compile(r"^type\s+([A-Za-z0-9_]+)\s+(struct|interface|[A-Za-z0-9_*\[\]]+)")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("package "):
+            out_lines.append(ln.rstrip())
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("import ("):
+            in_import_block = True
+            out_lines.append("import ( ... )")
+            curr_doc.clear()
+            continue
+        if in_import_block:
+            if ln.startswith(")"):
+                in_import_block = False
+            continue
+        if ln.startswith("import "):
+            if import_count == 0:
+                out_lines.append(ln.rstrip())
+            import_count += 1
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("const (") or ln.startswith("var ("):
+            in_const_var_block = True
+            out_lines.append(f"{ln.split()[0]} ( ... )")
+            curr_doc.clear()
+            continue
+        if in_const_var_block:
+            if ln.startswith(")"):
+                in_const_var_block = False
+            continue
+
+        if ln and not ln[0].isspace():
+            m_fn = fn_pattern.match(ln)
+            if m_fn:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            m_type = type_pattern.match(ln)
+            if m_type:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            if ln.startswith("const ") or ln.startswith("var "):
+                out_lines.append(f"{ln.rstrip()} (line {idx})")
+                curr_doc.clear()
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_rust_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    decl_pattern = re.compile(
+        r"^(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(fn|struct|enum|trait|type|impl|mod|const|static)\s+([A-Za-z0-9_]+)?"
+    )
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("///") or ln.startswith("//!"):
+            curr_doc.append(raw_stripped)
+            continue
+        if ln.startswith("#["):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("use ") or (ln.startswith("pub use ") and ";" in ln):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and not ln[0].isspace():
+            m = decl_pattern.match(ln)
+            if m:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_jvm_csharp_skeleton(rel_name: str, lines: list[str], suffix: str) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+    in_block_doc = False
+
+    class_pattern = re.compile(
+        r"^(?:(?:public|protected|private|internal|abstract|final|sealed|static|open|data|value)\s+)*(class|interface|enum|record|object|trait|struct)\s+([A-Za-z0-9_]+)"
+    )
+    method_pattern = re.compile(
+        r"^(?:(?:public|protected|private|internal|abstract|final|static|override|virtual|suspend|async|inline)\s+)*(?:fun\s+([A-Za-z0-9_]+)|(?:[A-Za-z0-9_<>,\[\]?]+)\s+([A-Za-z0-9_]+)\s*\([^)]*\))"
+    )
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("/**") or (in_block_doc and ln.startswith(" *")):
+            in_block_doc = True
+            curr_doc.append(raw_stripped)
+            continue
+        if in_block_doc and (ln.startswith(" */") or raw_stripped.endswith("*/")):
+            curr_doc.append(raw_stripped)
+            in_block_doc = False
+            continue
+        if ln.startswith("///"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("package ") or ln.startswith("namespace ") or ln.startswith("import ") or ln.startswith("using "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("@") or (suffix == ".cs" and ln.startswith("[") and ln.endswith("]")):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("    ") or ln.startswith("\t")):
+            indent = "    " if (ln.startswith("    ") or ln.startswith("\t")) else ""
+            m_class = class_pattern.match(raw_stripped)
+            if m_class:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+            m_method = method_pattern.match(raw_stripped)
+            if m_method and ("(" in raw_stripped and ")" in raw_stripped):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped and not in_block_doc:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_c_cpp_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    type_pattern = re.compile(r"^(?:typedef\s+)?(struct|class|enum|union)\s+([A-Za-z0-9_]+)?")
+    func_pattern = re.compile(r"^(?:[A-Za-z0-9_*&:]+\s+)+([A-Za-z0-9_:]+)\s*\([^)]*\)\s*(?:const)?\s*(?:noexcept)?\s*[{;]?")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//") or ln.startswith("/*") or ln.startswith(" *"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("#include") or ln.startswith("#define"):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and not ln[0].isspace():
+            m_type = type_pattern.match(ln)
+            if m_type:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            m_func = func_pattern.match(ln)
+            if m_func and ("(" in ln and ")" in ln):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_ruby_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"# Skeleton: {rel_name} ({len(lines)} lines)",
+        f"# Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("#"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("require ") or ln.startswith("require_relative "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("  ") or ln.startswith("\t")):
+            indent = "  " if (ln.startswith("  ") or ln.startswith("\t")) else ""
+            if raw_stripped.startswith("class ") or raw_stripped.startswith("module "):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                out_lines.append(f"{indent}{raw_stripped} ... (line {idx})")
+                continue
+            if raw_stripped.startswith("def "):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                out_lines.append(f"{indent}{raw_stripped} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n# ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_php_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    decl_pattern = re.compile(r"^(?:(?:final|abstract|readonly)\s+)?(class|interface|trait|enum)\s+([A-Za-z0-9_]+)")
+    func_pattern = re.compile(r"^(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+([A-Za-z0-9_]+)\s*\([^)]*\)")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//") or ln.startswith("/*") or ln.startswith(" *") or ln.startswith("#"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("<?php") or ln.startswith("namespace ") or ln.startswith("use "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("    ") or ln.startswith("\t")):
+            indent = "    " if (ln.startswith("    ") or ln.startswith("\t")) else ""
+            m_decl = decl_pattern.match(raw_stripped)
+            if m_decl:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+            m_func = func_pattern.match(raw_stripped)
+            if m_func:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
 def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
     """Generates a compact structural outline of a file to minimize prompt tokens."""
     try:
@@ -265,6 +600,42 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
                 return "\n".join(skel_lines) + "\n"
         except Exception:
             pass
+
+    # Go: package, types, funcs, methods
+    if suffix == ".go":
+        res = _extract_go_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Rust: use, structs, enums, traits, impls, fns
+    if suffix == ".rs":
+        res = _extract_rust_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Java, Kotlin, C#
+    if suffix in {".java", ".kt", ".kts", ".cs"}:
+        res = _extract_jvm_csharp_skeleton(rel_name, lines, suffix)
+        if res:
+            return res
+
+    # C, C++
+    if suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx"}:
+        res = _extract_c_cpp_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Ruby
+    if suffix == ".rb":
+        res = _extract_ruby_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # PHP
+    if suffix == ".php":
+        res = _extract_php_skeleton(rel_name, lines)
+        if res:
+            return res
 
     # JavaScript / TypeScript / React JSX & TSX signature extraction
     if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:

@@ -17,7 +17,7 @@ COMMAND path [<<< content >>>]
 - `APPEND|PREPEND path <<< content >>>`
 - `INSERT_BEFORE|INSERT_AFTER path` — with MARKER / CONTENT pairs
 - `PATCH path <<< unified diff >>>`
-- `FETCH path[:start-end|:symbol]` — request full file or line slice. **Batch all needed FETCH lines in ONE block**.
+- `FETCH path[:start-end|:symbol]` — request full file, line slice, or function/class (e.g. `FETCH src/app.py:my_func`). **Batch all needed FETCH lines in ONE block**.
 - `MKDIR path` · `DELETE path` · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs OK: `MOVE test* -> dest/`)
 - `RUN cmd` — allowed: `pytest`, `python3 -m unittest`, `npm test`, `cargo test`, `ruff`, `black`
@@ -50,8 +50,10 @@ Multiple edits: repeat pairs under one `EDIT path`. Same style throughout.
 
 ## Critical rules
 
+- **Missing context? Ask first.** If you don't have project context or a file's code, do NOT guess. Ask user to run `code-exec bundle` (or `code-exec -b`), or emit a batch `FETCH` block.
+- **FETCH before EDIT if needed.** Request full files (`FETCH path`), slices (`FETCH path:80-140`), or symbols (`FETCH path:my_func`). Batch all `FETCH` lines into ONE block. The engine copies exact code to the clipboard for the next turn.
 - **ONE block per reply.** Never emit a second block as a correction — merge into ONE.
-- **SEARCH must be verbatim.** Copy exact lines from the file. Never write from memory. Never paraphrase.
+- **SEARCH must be verbatim.** Copy exact lines from the file or diff (`+` lines = current file). Never write from memory.
 - **3–6 unique lines** as anchor (max 60 lines). For large regions: first 4 + last 4 lines only.
 - **Never use generic anchors** (`pass`, `}`, `return`, bare HTML tags) — they match everywhere.
 - **Paths are project-relative** (`src/app.py`). Never guess; never use `~/`, `/`, or `..`.

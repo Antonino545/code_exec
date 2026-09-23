@@ -78,6 +78,8 @@ To avoid sending entire multi-megabyte repositories to an LLM:
 | :--- | :--- |
 | Interactive launcher menu | `code-exec` |
 | Apply plan from clipboard | `code-exec apply` |
+| Clipboard Watch Mode (real-time listener) | `code-exec watch` (or `-w`) |
+| Install shell completions (Zsh, Bash, Fish) | `code-exec --install-completions` |
 | Simulate without modifying files | `code-exec --dry-run` |
 | Preview diff before confirmation | `code-exec apply --diff` |
 | Revert the previous run | `code-exec undo` |

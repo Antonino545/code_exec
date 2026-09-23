@@ -46,6 +46,7 @@ from code_exec_types import (
     PROTECTED_SUFFIXES,
     SHELL_CHAINING_OPERATORS,
     CommandFailed,
+    FuzzyCandidate,
     MatchResult,
     OpError,
     Operation,
@@ -62,12 +63,16 @@ from code_exec_sandbox import (
 
 # Re-export matching engine
 from code_exec_matcher import (
+    CONFIDENT_THRESHOLD,
+    RESOLVER_THRESHOLD,
     _adjust_indentation,
     _find_closest_match,
+    _find_high_similarity_candidates,
     _find_high_similarity_match,
     _get_leading_indent,
     _match_line_spans,
     _normalize_jsx_line,
+    _semantic_similarity,
     _strip_symbols_and_emojis,
     apply_unified_patch,
     find_all,
@@ -101,6 +106,122 @@ from code_exec_fs import (
     undo_last_run,
     with_newlines,
 )
+
+# Audit log of fuzzy match resolutions applied in the current run
+AUDIT_FUZZY_RESOLUTIONS: list[tuple[str, tuple[int, int] | None, float]] = []
+
+
+def validate_fuzzy_replacement_safety(
+    target: str,
+    old_doc: str,
+    new_doc: str,
+    match: MatchResult,
+) -> None:
+    """
+    🛡️ Guardrails Pre-Validation:
+    Verifies that a fuzzy replacement does not corrupt file syntax or balance.
+    Checks:
+    - Python AST parsing for .py/.pyi files
+    - JSON parsing for .json files
+    - Bracket/brace balance for JS/TS/C/Go/Rust
+    """
+    target_lower = target.lower()
+
+    # 1. Python AST verification
+    if target_lower.endswith((".py", ".pyi")):
+        import ast
+        try:
+            ast.parse(new_doc, filename=target)
+        except SyntaxError as new_exc:
+            is_old_valid = True
+            try:
+                ast.parse(old_doc, filename=target)
+            except SyntaxError:
+                is_old_valid = False
+            if is_old_valid:
+                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+                raise OpError(
+                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke Python syntax: {new_exc.msg} (line {new_exc.lineno})"
+                )
+
+    # 2. JSON verification
+    elif target_lower.endswith(".json"):
+        import json
+        try:
+            json.loads(new_doc)
+        except Exception as new_exc:
+            is_old_valid = True
+            try:
+                json.loads(old_doc)
+            except Exception:
+                is_old_valid = False
+            if is_old_valid:
+                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+                raise OpError(
+                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke JSON syntax: {new_exc}"
+                )
+
+    # 3. Bracket/brace balance verification
+    elif target_lower.endswith((".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c", ".cpp", ".java")):
+        def _count_brackets(text: str) -> tuple[int, int, int]:
+            s = re.sub(r"//.*$", "", text, flags=re.MULTILINE)
+            s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
+            s = re.sub(r'"(?:\\.|[^"\\])*"', "", s)
+            s = re.sub(r"'(?:\\.|[^'\\])*'", "", s)
+            s = re.sub(r"`(?:\\.|[^`\\])*`", "", s)
+            curly = s.count("{") - s.count("}")
+            square = s.count("[") - s.count("]")
+            paren = s.count("(") - s.count(")")
+            return curly, square, paren
+
+        old_b = _count_brackets(old_doc)
+        new_b = _count_brackets(new_doc)
+        if old_b == (0, 0, 0) and new_b != (0, 0, 0):
+            diffs = []
+            if new_b[0] != 0:
+                diffs.append(f"curly brace {'unclosed' if new_b[0] > 0 else 'extra closing'} ({abs(new_b[0])})")
+            if new_b[1] != 0:
+                diffs.append(f"square bracket {'unclosed' if new_b[1] > 0 else 'extra closing'} ({abs(new_b[1])})")
+            if new_b[2] != 0:
+                diffs.append(f"parenthesis {'unclosed' if new_b[2] > 0 else 'extra closing'} ({abs(new_b[2])})")
+            line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+            raise OpError(
+                f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke bracket balance: {', '.join(diffs)}"
+            )
+
+
+def interactive_fuzzy_resolver(target: str, needle: str, candidates: list[FuzzyCandidate]) -> MatchResult | None:
+    """Resolver callback connected to code_exec_matcher.FUZZY_RESOLVER."""
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        chosen = ui.resolve_fuzzy_ambiguity(target, candidates)
+        if chosen is None:
+            return None
+        cand = chosen
+    else:
+        cand = candidates[0]
+
+    try:
+        doc = (ROOT / target).read_text(encoding="utf-8")
+        doc_lines = doc.split("\n")
+    except Exception:
+        doc_lines = []
+
+    accepted = ui.resolve_fuzzy_match(target, needle, doc_lines, cand)
+    if accepted:
+        pct = int(cand.similarity * 100)
+        note = f" (interactively resolved fuzzy match with {pct}% similarity)"
+        return MatchResult(
+            cand.start,
+            cand.end,
+            note,
+            fuzzy=True,
+            line_range=(cand.start_line, cand.end_line),
+            similarity=cand.similarity,
+            candidates=candidates,
+        )
+    return None
 
 
 
@@ -163,6 +284,9 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
                 replacement = _adjust_indentation(doc, match.line_range, op.data, replacement, newline)
 
             new = doc[: match.start] + replacement + doc[match.end :]
+            if match.fuzzy:
+                validate_fuzzy_replacement_safety(args[0], doc, new, match)
+                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
             done = "Edited"
 
@@ -191,6 +315,9 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
             else:
                 new = doc[: match.end] + newline + content_clean + doc[match.end :]
                 done = "Inserted after marker in"
+            if match.fuzzy:
+                validate_fuzzy_replacement_safety(args[0], doc, new, match)
+                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
 
         elif command == "APPEND":
@@ -1029,6 +1156,7 @@ def copy_verification_error_to_clipboard(cmd: str, returncode: int, output: str,
 
 
 def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False, match_cache: dict | None = None, verify_cmd: str | None = None) -> int:
+    AUDIT_FUZZY_RESOLUTIONS.clear()
     fetch_ops = [op for op in operations if op.command == "FETCH"]
     exec_ops = [op for op in operations if op.command not in {"COMMIT", "FETCH"}]
 
@@ -1099,6 +1227,8 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
     fs.save_backup_manifest()
     ui.done()
+    if AUDIT_FUZZY_RESOLUTIONS:
+        ui.fuzzy_audit_summary(AUDIT_FUZZY_RESOLUTIONS)
 
     # Post-apply verification hook (--verify)
     if verify_cmd:
@@ -1210,12 +1340,18 @@ def main(argv=None) -> int:
                         help="Run as if code-exec was started in <path> instead of the current working directory")
     parser.add_argument("-b", "--bundle", "--single-file", dest="bundle", action="store_true",
                         help="Export a single consolidated markdown bundle (PROJECT_CONTEXT.md) and copy to clipboard")
+    parser.add_argument("-w", "--watch", dest="watch", action="store_true",
+                        help="Watch clipboard in background and auto-prompt when AI code plans are detected")
+    parser.add_argument("--install-completions", dest="install_completions", action="store_true",
+                        help="Install shell autocompletions for active shell (bash, zsh, fish)")
     parser.add_argument("--full", action="store_true",
                         help="Export full file contents in bundle instead of default compact skeletons")
     parser.add_argument("--verify", nargs="?", const="auto", default=None, metavar="CMD",
                         help="Run a verification command after applying (e.g. 'pytest'). "
                              "Pass 'auto' or omit the value to auto-detect from .code-exec-verify "
                              "or project type (package.json → npm test, etc.)")
+    parser.add_argument("--fuzzy", choices=["prompt", "strict", "auto"], default=None,
+                        help="Fuzzy matching resolution policy: prompt (interactive), strict (fail if <90%%), auto (accept >=72%%)")
     args = parser.parse_args(argv)
 
     if args.version:
@@ -1319,6 +1455,24 @@ def main(argv=None) -> int:
             print(f"  Available themes: {', '.join(ui.palette.themes.keys())}")
             print("  Usage: code-exec theme <name>\n")
             return 0
+    elif args.action in {"watch", "listen", "-w"}:
+        args.watch = True
+        args.action = None
+    elif args.action in {"completions", "completion"}:
+        from code_exec_completions import generate_bash_completions, generate_zsh_completions, generate_fish_completions
+        sh = (args.subarg or "").lower()
+        if sh == "bash":
+            print(generate_bash_completions())
+        elif sh == "fish":
+            print(generate_fish_completions())
+        elif sh in {"zsh", ""}:
+            print(generate_zsh_completions())
+        else:
+            return fail(f"Unsupported shell '{sh}'. Choose: zsh, bash, fish")
+        return 0
+    elif args.action in {"install-completions", "install-completion"}:
+        args.install_completions = True
+        args.action = None
     elif args.action and not args.file and not Path(args.action).exists():
         return fail(f"Unknown command or file: '{args.action}'. Run 'code-exec' without arguments for the menu.")
 
@@ -1340,6 +1494,8 @@ def main(argv=None) -> int:
         args.no_commit,
         args.export_plan,
         args.bundle,
+        getattr(args, "watch", False),
+        getattr(args, "install_completions", False),
     ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
@@ -1370,6 +1526,8 @@ def main(argv=None) -> int:
             args.commit_prompt = True
         elif choice in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
             args.export_plan = True
+        elif choice in {"w", "watch"}:
+            args.watch = True
         elif choice in {"b", "bundle", "pack", "outline", "digest"}:
             args.export_plan = True
             args.bundle = True
@@ -1391,6 +1549,25 @@ def main(argv=None) -> int:
     if args.help:
         ui.show_guide()
         return 0
+
+    if getattr(args, "install_completions", False):
+        from code_exec_completions import install_completions
+        ok, shell_name, msg = install_completions(args.subarg)
+        if ok:
+            ui.completions_installed(shell_name, msg)
+            return 0
+        return fail(f"Could not install completions: {msg}")
+
+    if getattr(args, "watch", False):
+        from code_exec_watch import watch_clipboard
+        return watch_clipboard(
+            args,
+            ROOT,
+            ui,
+            preflight_fn=preflight,
+            apply_plan_fn=apply_plan,
+            generate_diff_fn=generate_plan_diff,
+        )
 
     if args.export_plan:
         from code_exec_plan_export import create_plan_folder, create_plan_bundle
@@ -1542,9 +1719,18 @@ def main(argv=None) -> int:
         return fail("Plan contains RUN but --no-run was given. No files were modified.")
 
     # Wire --verbose into the matcher before plan execution
+    import code_exec_matcher as _matcher_mod
     if getattr(args, "verbose", False):
-        import code_exec_matcher as _matcher_mod
         _matcher_mod.VERBOSE = True
+
+    fuzzy_policy = getattr(args, "fuzzy", None) or os.environ.get("CODE_EXEC_FUZZY", "").strip().lower()
+    if not fuzzy_policy:
+        fuzzy_policy = "prompt" if is_interactive else "strict"
+    _matcher_mod.FUZZY_POLICY = fuzzy_policy
+    if fuzzy_policy == "prompt" and is_interactive:
+        _matcher_mod.FUZZY_RESOLVER = interactive_fuzzy_resolver
+    else:
+        _matcher_mod.FUZZY_RESOLVER = None
 
     try:
         reason, deferred, match_cache = preflight(operations)
