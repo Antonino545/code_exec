@@ -159,6 +159,17 @@ class TerminalUI:
 
     def __init__(self):
         self.palette = TerminalPalette()
+        self._active_search = None
+
+    def stop_searching(self) -> None:
+        """Immediately stop and clear any active searching animation thread."""
+        active = getattr(self, "_active_search", None)
+        if active is not None:
+            try:
+                active.stop()
+            finally:
+                self._active_search = None
+
 
     # ------------------------------------------------------------------ #
     # Panel primitives
@@ -295,13 +306,17 @@ class TerminalUI:
         return c.paint(f" {label:<7} ", colors.get(cmd, c.SLATE), bold=True)
 
     def prompt_choice(self, prompt_text: str, default: str = "") -> str:
+        self.stop_searching()
         c = self.palette
         text = prompt_text.strip().rstrip(":")
         prompt_str = f"  {c.paint('❯', c.CORAL, bold=True)} {c.paint(text, c.WHITE, bold=True)} "
         try:
             val = input(prompt_str).strip()
             return val if val else default
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            print()
+            raise
+        except EOFError:
             print()
             return default
 
@@ -783,7 +798,7 @@ class TerminalUI:
                 self.stop_event = None
                 self.thread = None
 
-            def __enter__(self):
+            def start(self):
                 import threading
                 import time
 
@@ -812,61 +827,25 @@ class TerminalUI:
                 self.thread.start()
                 return self
 
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                if self.stop_event:
+            def stop(self):
+                if self.stop_event is not None:
                     self.stop_event.set()
                 if self.thread and self.thread.is_alive():
                     self.thread.join(timeout=0.3)
+                try:
                     sys.stdout.write("\r\033[K")
                     sys.stdout.flush()
-
-        return _SearchStatus(self, target)
-
-    def searching(self, target: str):
-        """Context manager displaying a live searching indicator during expensive scans."""
-        class _SearchStatus:
-            def __init__(self, ui_inst, file_target: str):
-                self.ui = ui_inst
-                self.target = file_target
-                self.stop_event = None
-                self.thread = None
+                except Exception:
+                    pass
 
             def __enter__(self):
-                import threading
-                import time
-
-                self.stop_event = threading.Event()
-                is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-                if not is_tty:
-                    return self
-
-                c = self.ui.palette
-
-                def _animate():
-                    dots = [".  ", ".. ", "...", "   "]
-                    idx = 0
-                    time.sleep(0.18)
-                    while not self.stop_event.is_set():
-                        dot = dots[idx % len(dots)]
-                        msg = f"\r  {c.paint('●', c.CYAN)} Searching in {c.paint(self.target, c.WHITE)} {c.paint(dot, c.AMBER)}"
-                        sys.stdout.write(msg)
-                        sys.stdout.flush()
-                        idx += 1
-                        time.sleep(0.18)
-                    sys.stdout.write("\r\033[K")
-                    sys.stdout.flush()
-
-                self.thread = threading.Thread(target=_animate, daemon=True)
-                self.thread.start()
-                return self
+                self.ui._active_search = self
+                return self.start()
 
             def __exit__(self, exc_type, exc_val, exc_tb):
-                if self.stop_event:
-                    self.stop_event.set()
-                if self.thread and self.thread.is_alive():
-                    self.thread.join(timeout=0.3)
-                    sys.stdout.write("\r\033[K")
-                    sys.stdout.flush()
+                self.stop()
+                if getattr(self.ui, "_active_search", None) is self:
+                    self.ui._active_search = None
 
         return _SearchStatus(self, target)
 
@@ -919,6 +898,7 @@ class TerminalUI:
         Interactive panel prompting the user to accept/reject a borderline fuzzy match.
         Options: [a] Accept, [v] View Diff, [s] Skip, [q] Abort.
         """
+        self.stop_searching()
         c = self.palette
         s_line = candidate.start_line
         e_line = candidate.end_line
@@ -952,7 +932,9 @@ class TerminalUI:
         self._card(f"🛡️ Fuzzy Match Resolver · {target}", "warn", lines)
 
         while True:
-            choice = self.prompt_choice("Resolve match? [a/v/s/q]", default="a").lower()
+            choice = self.prompt_choice("Resolve match? [a/v/s/q]", default="a").strip().lower()
+            if not choice or choice in {"a", "accept", "y", "yes"}:
+                return True
             if choice in {"v", "view", "diff"}:
                 import difflib
                 diff = list(
@@ -966,13 +948,11 @@ class TerminalUI:
                 )
                 self.show_diff("\n".join(diff))
                 continue
-            if choice in {"a", "accept", "y", "yes"}:
-                return True
             if choice in {"s", "skip", "n", "no"}:
                 return False
             if choice in {"q", "quit", "abort", "exit"}:
                 raise KeyboardInterrupt()
-            return False
+            print(c.paint("  Please select [a]ccept, [v]iew diff, [s]kip, or [q]uit.", c.AMBER))
 
     def resolve_fuzzy_ambiguity(
         self,
@@ -982,6 +962,7 @@ class TerminalUI:
         """
         Interactive selection panel when multiple close fuzzy candidates are detected.
         """
+        self.stop_searching()
         c = self.palette
         lines = [
             self._line(f"Multiple candidates detected for SEARCH block in {target}:", c.AMBER, bold=True),
@@ -999,14 +980,16 @@ class TerminalUI:
         self._card(f"🛡️ Disambiguate Matches · {target}", "warn", lines)
 
         while True:
-            choice = self.prompt_choice(f"Select candidate [1-{min(len(candidates), 5)}/q]", default="1").lower()
+            choice = self.prompt_choice(f"Select candidate [1-{min(len(candidates), 5)}/q]", default="1").strip().lower()
+            if not choice or choice == "1":
+                return candidates[0]
             if choice.isdigit():
                 num = int(choice)
                 if 1 <= num <= min(len(candidates), 5):
                     return candidates[num - 1]
             if choice in {"q", "quit", "abort", "exit"}:
                 return None
-            return candidates[0]
+            print(c.paint(f"  Please select a number between 1 and {min(len(candidates), 5)}, or [q] to abort.", c.AMBER))
 
     def fuzzy_audit_summary(self, audit_entries: list[tuple[str, tuple[int, int] | None, float]]) -> None:
         """

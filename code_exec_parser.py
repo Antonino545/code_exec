@@ -448,9 +448,13 @@ def extract_plan(text: str) -> str:
 
     def keep_unclosed(block: str, what: str) -> None:
         # Forgot the closing fence, but every operation is complete: accept it.
+        cleaned_block = block.rstrip("`~ \t\n")
         if _parses_cleanly(block):
             _warn(f"closing marker missing for {what}; plan is complete, applying it")
             plans.append(block)
+        elif _parses_cleanly(cleaned_block):
+            _warn(f"closing marker missing for {what}; plan is complete, applying it")
+            plans.append(cleaned_block)
         else:
             unclosed.append(f"unclosed {what}")
 
@@ -465,9 +469,13 @@ def extract_plan(text: str) -> str:
             block_lines = []
             found_end = False
             while i < len(lines):
-                if lines[i].strip().upper().replace(" ", "_") == "END_CODE_EXEC_PLAN":
+                curr_stripped = lines[i].strip().upper().replace(" ", "_")
+                if curr_stripped == "END_CODE_EXEC_PLAN":
                     found_end = True
                     i += 1
+                    break
+                if curr_stripped == "CODE_EXEC_PLAN" and _parses_cleanly("\n".join(block_lines)):
+                    found_end = True
                     break
                 block_lines.append(lines[i])
                 i += 1
@@ -503,20 +511,25 @@ def extract_plan(text: str) -> str:
                             content_depth -= 1
 
                 if content_depth == 0:
-                    close_match = re.match(r"^[ \t]*(`{3,}|~{3,})[ \t]*$", curr)
+                    close_match = re.match(r"^[ \t]*(`{3,}|~{3,})([a-zA-Z0-9_-]*)[ \t]*$", curr)
                     if close_match:
                         c_chars = close_match.group(1)
-                        if c_chars[0] == fence_char and len(c_chars) >= fence_len:
-                            # For a code_exec block, only honor this as the real closer if
-                            # the plan collected so far is actually complete. A CREATE/EDIT
-                            # may be writing a file (e.g. a README) that itself contains a
-                            # nested ```/~~~ example; without this check that inner fence
-                            # would close the outer block early and silently truncate
-                            # everything after it.
-                            if not is_code_exec or _parses_cleanly("\n".join(block_lines)):
-                                found_end = True
-                                i += 1
-                                break
+                        c_tag = close_match.group(2).strip()
+                        c_len = len(c_chars)
+                        if c_chars[0] == fence_char:
+                            # 1. New code_exec block starting immediately without preceding closer:
+                            if is_code_exec and _is_code_exec_fence(c_tag):
+                                if _parses_cleanly("\n".join(block_lines)) and _has_later_command(lines, i + 1):
+                                    found_end = True
+                                    # Do not advance i; outer loop will process this new fence
+                                    break
+
+                            # 2. Closer: matching fence length, or relaxed fence length (e.g. 4-backtick open, 3-backtick close)
+                            if c_len >= fence_len or c_len >= 3:
+                                if not is_code_exec or _parses_cleanly("\n".join(block_lines)):
+                                    found_end = True
+                                    i += 1
+                                    break
 
                 if is_code_exec:
                     block_lines.append(curr)
@@ -533,9 +546,14 @@ def extract_plan(text: str) -> str:
         i += 1
 
     if unclosed:
-        if len(plans) == 0:
-            raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
-        raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans) + len(unclosed)}")
+        if not MERGE_MULTIPLE_PLANS:
+            if len(plans) == 0:
+                raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
+            raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans) + len(unclosed)}")
+        else:
+            if len(plans) == 0:
+                raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
+            _warn(f"{len(unclosed)} incomplete block(s) skipped; merged {len(plans)} complete plan block(s)")
 
     if len(plans) == 1:
         return plans[0]
@@ -543,7 +561,7 @@ def extract_plan(text: str) -> str:
     if len(plans) > 1:
         if MERGE_MULTIPLE_PLANS:
             _warn(f"{len(plans)} plan blocks found; merged in order (prefer a single block)")
-            return "\n".join(plans)
+            return "\n\n".join(p.strip() for p in plans if p.strip())
         raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans)}")
 
     # Format 3: unfenced plan (optionally wrapped in a plain fence, optionally after some prose)

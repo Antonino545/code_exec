@@ -131,6 +131,40 @@ class PlanExtraction(Base):
             p.extract_plan("```code_exec\nDELETE a.py\n```\nPlan 2:\n```code_exec\nDELETE b.py\n```")
         self.assertIn("ERR|MULTIPLE_PLANS|2", str(ctx.exception))
 
+    def test_twenty_blocks_merged_into_one_plan(self):
+        blocks = []
+        expected_files = []
+        for i in range(20):
+            fname = f"file_{i}.py"
+            expected_files.append(fname)
+            blocks.append(f"Here is update {i}:\n```code_exec\nDELETE {fname}\n```")
+        text = "\n\n".join(blocks)
+        r = ops(text)
+        self.assertEqual([o.args[0] for o in r], expected_files)
+        self.assertTrue(any("20 plan blocks found; merged" in w for w in p.take_warnings()))
+
+    def test_four_backtick_opener_three_backtick_closer(self):
+        text = "````code_exec\nDELETE test_fence.py\n```"
+        r = ops(text)
+        self.assertEqual([o.args[0] for o in r], ["test_fence.py"])
+
+    def test_closer_with_language_tag(self):
+        text = "```code_exec\nDELETE tag_closer.py\n```code_exec"
+        r = ops(text)
+        self.assertEqual([o.args[0] for o in r], ["tag_closer.py"])
+
+    def test_unclosed_trailing_block_with_completed_plans_merges_cleanly(self):
+        text = (
+            "```code_exec\nDELETE first.py\n```\n"
+            "```code_exec\nDELETE second.py\n```\n"
+            "Here is a cut off block:\n"
+            "```code_exec\nCREATE truncated.py <<<\npartial content without close"
+        )
+        r = ops(text)
+        self.assertEqual([o.args[0] for o in r], ["first.py", "second.py"])
+        warnings = p.take_warnings()
+        self.assertTrue(any("incomplete block(s) skipped" in w for w in warnings))
+
 
 class NoPlanIsNotAnError(Base):
     """A plan is optional: an ordinary answer must not produce a failure."""
