@@ -1189,6 +1189,10 @@ def main(argv=None) -> int:
                         help="Show which matching tier was used for each SEARCH block")
     parser.add_argument("--short", action="store_true",
                         help="With -p: copy the compact instructions (for small/local models)")
+    parser.add_argument("--verify", nargs="?", const="auto", default=None, metavar="CMD",
+                        help="Run a verification command after applying (e.g. 'pytest'). "
+                             "Pass 'auto' or omit the value to auto-detect from .code-exec-verify "
+                             "or project type (package.json → npm test, etc.)")
     args = parser.parse_args(argv)
 
     if args.action in {"1", "apply"}:
