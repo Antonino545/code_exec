@@ -57,6 +57,7 @@ Multiple edits: repeat pairs under one `EDIT path`. Same style throughout.
 - **3–6 unique lines** as anchor (max 60 lines). For large regions: first 4 + last 4 lines only.
 - **Never use generic anchors** (`pass`, `}`, `return`, bare HTML tags) — they match everywhere.
 - **Paths are project-relative** (`src/app.py`). Never guess; never use `~/`, `/`, or `..`.
+- **Raw ASCII only (no LaTeX/HTML escapes).** NEVER use `\vert{}\vert{}`, `\&\&`, `&amp;&amp;`, `\leq`, etc. Always write literal `||`, `&&`, `|`, `&`, `<`, `>`, `<=`, `>=`, `!=`, `%`.
 - No prose inside the block. No comments. No explanations.
 
 ## Errors → clipboard retry

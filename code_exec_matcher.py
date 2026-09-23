@@ -117,6 +117,10 @@ def _normalize_code_line_for_fuzzy(line: str) -> str:
     s = re.sub(r",\s*([\]\}\)])", r"\1", s)
     s = re.sub(r",\s*$", "", s)
     s = re.sub(r";\s*$", "", s)
+    s = re.sub(r"\\vert\{\}\s*\\vert\{\}", "||", s)
+    s = re.sub(r"\\vert\{\}", "|", s)
+    s = re.sub(r"&amp;\s*&amp;", "&&", s)
+    s = re.sub(r"\\&\s*\\&", "&&", s)
     s = _strip_symbols_and_emojis(s)
     return s.strip()
 
@@ -376,6 +380,10 @@ def _match_js_tokens(doc: str, needle: str) -> list[tuple[int, int, int, int]]:
         s = re.sub(r"/\*.*?\*/", "", s)
         s = s.replace('"', "'").replace("`", "'")
         s = re.sub(r",\s*([}\]])", r"\1", s)
+        s = re.sub(r"\\vert\{\}\s*\\vert\{\}", "||", s)
+        s = re.sub(r"\\vert\{\}", "|", s)
+        s = re.sub(r"&amp;\s*&amp;", "&&", s)
+        s = re.sub(r"\\&\s*\\&", "&&", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s
 

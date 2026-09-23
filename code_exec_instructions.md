@@ -93,6 +93,14 @@ Delimiter rules:
 - ❌ **NEVER place prose, comments, or explanations inside the `code_exec` block.** Put them outside.
 - ❌ **NEVER mix block styles** (`SEARCH <<<` then `====`). Pick one style and use it throughout.
 
+### Raw code and symbol formatting (CRITICAL)
+- ❌ **NEVER use LaTeX math notation or HTML entity escapes in code, commands, or diffs.**
+  - Do NOT write `\vert{}\vert{}`, `\vert{}`, `\vert\vert`, or `\Vert` — write literal `||` or `|`.
+  - Do NOT write `\&\&`, `\&`, `&amp;&amp;`, or `&amp;` — write literal `&&` or `&`.
+  - Do NOT write `\leq`, `\geq`, `\neq`, `&lt;=`, `&gt;=`, `&ne;` — write literal `<=`, `>=`, `!=`.
+  - Do NOT write `\%`, `\sim`, `\textasciitilde`, `\textasciicircum` — write literal `%`, `~`, `^`.
+- ✅ **ALWAYS output raw literal ASCII characters.** All text inside the `code_exec` block is raw source code, NEVER LaTeX or Markdown math formatting.
+
 ### Skeleton context & FETCH workflow (Batch Requests)
 When provided with skeleton or compact context to conserve tokens, or whenever you need exact file contents:
 1. Examine the project tree, classes, and function signatures.

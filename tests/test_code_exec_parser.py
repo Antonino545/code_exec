@@ -329,6 +329,30 @@ class Normalisation(Base):
         self.assertEqual([o.command for o in r], ["DELETE", "RUN"])
         self.assertEqual(r[1].args[0], "pytest -x")
 
+    def test_latex_pipe_glitches_restored(self):
+        r = ops("EDIT a.py\nSEARCH <<<\nif a \\vert{}\\vert{} b:\n>>>\nREPLACE <<<\nif a \\vert{}\\vert{} b \\vert{}\\vert{} c:\n>>>")
+        self.assertEqual((r[0].data, r[0].extra), ("if a || b:", "if a || b || c:"))
+        self.assertTrue(any("glitch" in w or "escaped" in w for w in p.take_warnings()))
+
+    def test_latex_and_entity_ampersand_glitches_restored(self):
+        r = ops("EDIT a.py\nSEARCH <<<\nif a \\&\\& b:\n>>>\nREPLACE <<<\nif a &amp;&amp; b:\n>>>")
+        self.assertEqual((r[0].data, r[0].extra), ("if a && b:", "if a && b:"))
+        self.assertTrue(any("glitch" in w or "escaped" in w for w in p.take_warnings()))
+
+    def test_latex_comparisons_and_operators_restored(self):
+        r = ops("CREATE a.py <<<\nif x \\leq 10 and y \\geq 20 and z \\neq 30 and rem == a \\% 2:\n    return a \\& b\n>>>")
+        self.assertIn("if x <= 10 and y >= 20 and z != 30 and rem == a % 2:", r[0].data)
+        self.assertIn("return a & b", r[0].data)
+        self.assertTrue(any("escaped symbol" in w for w in p.take_warnings()))
+
+    def test_run_command_latex_and_ampersand_restored(self):
+        r = ops("RUN npm test \\vert{}\\vert{} true && pytest \\&\\& ruff")
+        self.assertEqual(r[0].args[0], "npm test || true && pytest && ruff")
+
+    def test_latex_file_preserves_latex(self):
+        r = ops("CREATE paper.tex <<<\nTable 1 \\& 2 with 50\\% error where $x \\leq y$.\n>>>")
+        self.assertIn("Table 1 \\& 2 with 50\\% error where $x \\leq y$.", r[0].data)
+
 
 # --------------------------------------------------------------------------- #
 # Things that must still be rejected

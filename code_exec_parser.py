@@ -288,6 +288,88 @@ def _dedent_plan(text: str) -> str:
     return text
 
 
+_TEX_EXTENSIONS = {".tex", ".latex", ".sty", ".cls", ".dtx", ".ins", ".bib"}
+_HTML_EXTENSIONS = {".html", ".htm", ".xml", ".svg", ".xhtml"}
+
+
+def _sanitize_universal_glitches(text: str) -> tuple[str, int]:
+    """
+    Sanitize unambiguous LaTeX and HTML entity glitches that should never appear in code/plans:
+    - `\\vert{}\\vert{}`, `\\vert\\vert`, `\\Vert`, `&#124;&#124;` -> `||`
+    - `\\vert{}`, `&#124;`, `&vert;` -> `|`
+    - `&amp;&amp;`, `\\&\\&`, `\\& \\&` -> `&&`
+    - `&lt;=`, `&gt;=`, `&ne;`, `&#8800;` -> `<=`, `>=`, `!=`
+    - `\\textasciitilde{}`, `\\textasciicircum{}` -> `~`, `^`
+    """
+    count = 0
+    patterns = [
+        # Double pipes (logical OR / bitwise OR)
+        (r"\\vert\{\}\s*\\vert\{\}", "||"),
+        (r"\\vert\s*\\vert(?![A-Za-z])", "||"),
+        (r"\\Vert(?:\{\})?(?![A-Za-z])", "||"),
+        (r"&#124;\s*&#124;|&vert;\s*&vert;", "||"),
+        # Single pipes
+        (r"\\vert\{\}", "|"),
+        (r"&#124;|&vert;", "|"),
+        # Double ampersand (logical AND)
+        (r"&amp;\s*&amp;", "&&"),
+        (r"\\&\s*\\&", "&&"),
+        # Comparisons & relations
+        (r"&lt;=", "<="),
+        (r"&gt;=", ">="),
+        (r"&ne;|&#8800;", "!="),
+        # Typography / special escapes
+        (r"\\textasciitilde(?:\{\})?", "~"),
+        (r"\\textasciicircum(?:\{\})?", "^"),
+    ]
+    cur = text
+    for pat, rep in patterns:
+        cur, n = re.subn(pat, rep, cur)
+        count += n
+    return cur, count
+
+
+def _sanitize_file_glitches(text: str, filename: str) -> tuple[str, int]:
+    """
+    Sanitize language-specific glitched escapes for non-TeX and non-HTML files.
+    """
+    ext = Path(filename).suffix.lower() if filename else ""
+    is_tex = ext in _TEX_EXTENSIONS
+    is_html = ext in _HTML_EXTENSIONS
+    count = 0
+    cur = text
+
+    if not is_tex:
+        tex_patterns = [
+            (r"\\leq(?![A-Za-z])", "<="),
+            (r"\\geq(?![A-Za-z])", ">="),
+            (r"\\neq(?![A-Za-z])", "!="),
+            (r"\\vert(?![A-Za-z])", "|"),
+            (r"(?<!\\)\\&", "&"),
+            (r"(?<!\\)\\%", "%"),
+            (r"\\sim(?![A-Za-z])", "~"),
+        ]
+        for pat, rep in tex_patterns:
+            cur, n = re.subn(pat, rep, cur)
+            count += n
+
+    if not is_html:
+        html_patterns = [
+            (r"&amp;", "&"),
+            (r"&quot;", '"'),
+            (r"&#39;|&apos;", "'"),
+            (r"&lt;&lt;", "<<"),
+            (r"&gt;&gt;", ">>"),
+            (r"&lt;", "<"),
+            (r"&gt;", ">"),
+        ]
+        for pat, rep in html_patterns:
+            cur, n = re.subn(pat, rep, cur)
+            count += n
+
+    return cur, count
+
+
 def _normalize(text: str) -> str:
     text = (
         text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ").translate(_ZERO_WIDTH)
@@ -295,6 +377,10 @@ def _normalize(text: str) -> str:
     text, removed = _THINK_TAG.subn("", text)
     if removed:
         _warn(f"ignored {removed} <thinking> block(s)")
+
+    text, n_glitches = _sanitize_universal_glitches(text)
+    if n_glitches:
+        _warn(f"restored {n_glitches} LaTeX / entity glitch(es) (e.g. \\vert{{}}\\vert{{}} -> ||, \\&\\& -> &&)")
 
     fixed = 0
     lines = []
@@ -848,6 +934,25 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     return Operation(command, (path,), first, second), i
 
 
+def _sanitize_operation(op: Operation, lineno: int, warn: Callable[[str], None]) -> Operation:
+    if op.command in {"RUN", "COMMIT"}:
+        cmd_text = op.args[0]
+        cleaned, n = _sanitize_file_glitches(cmd_text, "command.sh")
+        if n:
+            warn(f"line {lineno}: sanitized {n} escaped symbol(s) in {op.command} argument")
+            return Operation(op.command, (cleaned,), source_line=op.source_line)
+        return op
+
+    if op.args:
+        path = op.args[0]
+        cleaned_data, n1 = _sanitize_file_glitches(op.data, path) if op.data else (op.data, 0)
+        cleaned_extra, n2 = _sanitize_file_glitches(op.extra, path) if op.extra else (op.extra, 0)
+        if n1 or n2:
+            warn(f"line {lineno}: sanitized {n1 + n2} escaped symbol(s) in {op.command} {path}")
+            return Operation(op.command, op.args, cleaned_data, cleaned_extra, source_line=op.source_line)
+    return op
+
+
 def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
     lines = text.split("\n")
     operations: list[Operation] = []
@@ -884,7 +989,12 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             if _DIFF_OPEN.match(line) or re.match(rf"^{kw}\s*:?\s*(<{{1,5}})?\s*$", line, re.IGNORECASE):
                 try:
                     first, second, i = _read_pair(lines, i, last_cmd)
-                    operations.append(Operation(last_cmd, operations[-1].args, first, second))
+                    op_bare = _sanitize_operation(
+                        Operation(last_cmd, operations[-1].args, first, second, source_line=lineno),
+                        lineno,
+                        warn,
+                    )
+                    operations.append(op_bare)
                     continue
                 except ValueError as exc:
                     raise ValueError(f"line {lineno}: {exc}") from None
@@ -900,6 +1010,7 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
         operation.source_line = lineno
+        operation = _sanitize_operation(operation, lineno, warn)
         operations.append(operation)
 
         # Several SEARCH/REPLACE (or MARKER/CONTENT) pairs under one command become
@@ -915,6 +1026,7 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
                     break
                 first, second, i = nxt
                 child = Operation(operation.command, operation.args, first, second, source_line=lineno)
+                child = _sanitize_operation(child, lineno, warn)
                 operations.append(child)
                 extra += 1
             if extra:
