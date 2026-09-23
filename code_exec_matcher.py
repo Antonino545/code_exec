@@ -7,11 +7,24 @@ import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_exec_types import MatchResult, OpError
+from typing import Callable
+
+from code_exec_types import FuzzyCandidate, MatchResult, OpError
 from code_exec_ui import ui
 
 # Set to True via --verbose to trace which matching tier was used for each SEARCH block.
 VERBOSE: bool = False
+
+# Dual-Threshold Activation Zones
+CONFIDENT_THRESHOLD: float = 0.90
+RESOLVER_THRESHOLD: float = 0.72
+
+# Fuzzy policy: "prompt" (interactive TTY default), "strict" (fail if < 0.90), "auto" (accept >= 0.72)
+FUZZY_POLICY: str = "prompt"
+
+# Optional interactive resolver callback hooked by the UI/CLI
+# Signature: (target, needle, candidates) -> MatchResult | None
+FUZZY_RESOLVER: Callable[[str, str, list[FuzzyCandidate]], MatchResult | None] | None = None
 
 
 def _verbose_note(msg: str) -> None:
@@ -96,13 +109,66 @@ def _match_line_spans(
     return spans
 
 
-def _find_high_similarity_match(
-    doc: str, needle: str, threshold: float = 0.88, capture_newline: bool = False
-) -> tuple[int, int, int, int, float] | None:
+def _normalize_code_line_for_fuzzy(line: str) -> str:
+    """Normalize a code line for semantic comparison: strips comments, normalizes quotes/commas/semicolons."""
+    s = re.sub(r"#.*$", "", line)
+    s = re.sub(r"//.*$", "", s)
+    s = s.replace('"', "'").replace("`", "'")
+    s = re.sub(r",\s*([\]\}\)])", r"\1", s)
+    s = re.sub(r",\s*$", "", s)
+    s = re.sub(r";\s*$", "", s)
+    s = _strip_symbols_and_emojis(s)
+    return s.strip()
+
+
+def _semantic_similarity(needle_str: str, cand_str: str) -> float:
     """
-    Locates a uniquely matching line block with >= threshold structural similarity,
-    ignoring emojis, symbols, and minor attribute drifts.
-    Strictly refuses to match if multiple close candidates exist.
+    Computes a semantic-aware similarity score between 0.0 and 1.0.
+    Heavily penalizes identifier and keyword differences, while being tolerant
+    to formatting, quotes, comments, trailing commas, and whitespace.
+    """
+    needle_lines = [_normalize_code_line_for_fuzzy(ln) for ln in needle_str.split("\n")]
+    cand_lines = [_normalize_code_line_for_fuzzy(ln) for ln in cand_str.split("\n")]
+    needle_norm = "\n".join(ln for ln in needle_lines if ln)
+    cand_norm = "\n".join(ln for ln in cand_lines if ln)
+
+    if not needle_norm and not cand_norm:
+        return 1.0
+    if not needle_norm or not cand_norm:
+        return 0.0
+
+    if needle_norm == cand_norm:
+        return 1.0
+
+    # 1. Character-level SequenceMatcher ratio
+    char_matcher = difflib.SequenceMatcher(None, needle_norm, cand_norm)
+    char_ratio = char_matcher.ratio()
+
+    # 2. Token-level SequenceMatcher ratio on identifiers, keywords, numbers
+    needle_tokens = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b|\b\d+\b", needle_norm)
+    cand_tokens = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b|\b\d+\b", cand_norm)
+
+    if needle_tokens and cand_tokens:
+        tok_matcher = difflib.SequenceMatcher(None, needle_tokens, cand_tokens)
+        tok_ratio = tok_matcher.ratio()
+
+        # If semantic words/identifiers have diverged, heavily penalize
+        if tok_ratio < 0.65:
+            return min(char_ratio, tok_ratio) * 0.75
+        return 0.55 * tok_ratio + 0.45 * char_ratio
+    else:
+        return char_ratio
+
+
+def _find_high_similarity_candidates(
+    doc: str,
+    needle: str,
+    min_threshold: float = 0.72,
+    capture_newline: bool = False,
+) -> list[tuple[float, int, int, int, int, str]]:
+    """
+    Scans doc using elastic sliding windows and boundary-constrained matching.
+    Returns sorted list of (similarity, start_offset, end_offset, s_line, e_line, preview).
     """
     doc_lines = doc.split("\n")
     needle_lines = [ln for ln in needle.split("\n")]
@@ -113,10 +179,10 @@ def _find_high_similarity_match(
         needle_lines.pop()
 
     if not needle_lines:
-        return None
+        return []
 
     k = len(needle_lines)
-    needle_norm = "\n".join(_strip_symbols_and_emojis(ln) for ln in needle_lines)
+    needle_raw_str = "\n".join(needle_lines)
 
     offsets = []
     pos = 0
@@ -124,40 +190,115 @@ def _find_high_similarity_match(
         offsets.append(pos)
         pos += len(line) + 1
 
-    candidates = []
-    window_sizes = {max(1, k - 2), max(1, k - 1), k, k + 1, k + 2}
+    candidate_windows: set[tuple[int, int]] = set()
 
-    for w in window_sizes:
+    # 1. Elastic sliding window sizes (k - 4 to k + 5)
+    min_w = max(1, k - 4)
+    max_w = min(len(doc_lines), k + 5)
+    for w in range(min_w, max_w + 1):
         for i in range(len(doc_lines) - w + 1):
-            cand_lines = doc_lines[i : i + w]
-            cand_norm = "\n".join(_strip_symbols_and_emojis(ln) for ln in cand_lines)
-            matcher = difflib.SequenceMatcher(None, needle_norm, cand_norm)
-            if matcher.quick_ratio() >= threshold - 0.05:
-                r = matcher.ratio()
-                if r >= threshold:
-                    candidates.append((r, i, i + w - 1))
+            candidate_windows.add((i, i + w - 1))
 
+    bounded_windows: set[tuple[int, int]] = set()
+    # 2. Boundary-constrained window detection (when head & tail match)
+    if k >= 3:
+        head_text = _normalize_code_line_for_fuzzy(needle_lines[0])
+        tail_text = _normalize_code_line_for_fuzzy(needle_lines[-1])
+        if head_text and tail_text:
+            head_matches = [
+                idx for idx, ln in enumerate(doc_lines)
+                if _normalize_code_line_for_fuzzy(ln) == head_text
+            ]
+            tail_matches = [
+                idx for idx, ln in enumerate(doc_lines)
+                if _normalize_code_line_for_fuzzy(ln) == tail_text
+            ]
+            for h_idx in head_matches:
+                for t_idx in tail_matches:
+                    if t_idx >= h_idx and abs((t_idx - h_idx + 1) - k) <= 8:
+                        candidate_windows.add((h_idx, t_idx))
+                        bounded_windows.add((h_idx, t_idx))
+
+    evaluated: list[tuple[float, int, int]] = []
+    seen_spans: set[tuple[int, int]] = set()
+    for s_line, e_line in candidate_windows:
+        # Trim leading and trailing blank lines so candidate spans wrap code tightly
+        while s_line < e_line and not doc_lines[s_line].strip():
+            s_line += 1
+        while e_line > s_line and not doc_lines[e_line].strip():
+            e_line -= 1
+
+        if (s_line, e_line) in seen_spans:
+            continue
+        seen_spans.add((s_line, e_line))
+
+        cand_str = "\n".join(doc_lines[s_line : e_line + 1])
+        sm = difflib.SequenceMatcher(None, needle_raw_str, cand_str)
+        # Fast pre-filtering with quick_ratio
+        if sm.quick_ratio() < min_threshold - 0.15:
+            continue
+        sim = _semantic_similarity(needle_raw_str, cand_str)
+        if (s_line, e_line) in bounded_windows:
+            sim = min(1.0, sim + 0.06)
+        if sim >= min_threshold:
+            evaluated.append((sim, s_line, e_line))
+
+    if not evaluated:
+        return []
+
+    # Sort descending by similarity, earlier lines in document first
+    evaluated.sort(key=lambda x: (-x[0], x[1]))
+
+    # Deduplicate overlapping windows (keep highest similarity for each region)
+    deduped: list[tuple[float, int, int]] = []
+    occupied_lines: set[int] = set()
+    for sim, s, e in evaluated:
+        span_range = set(range(s, e + 1))
+        overlap = span_range.intersection(occupied_lines)
+        if len(overlap) > len(span_range) * 0.4:
+            continue
+        occupied_lines.update(span_range)
+        deduped.append((sim, s, e))
+
+    results: list[tuple[float, int, int, int, int, str]] = []
+    for sim, s, e in deduped:
+        start_offset = offsets[s]
+        if capture_newline and e + 1 < len(offsets):
+            end_offset = offsets[e + 1]
+        else:
+            tail = doc_lines[e]
+            if tail.endswith("\r"):
+                tail = tail[:-1]
+            end_offset = offsets[e] + len(tail)
+        preview = doc_lines[s].strip()
+        if len(preview) > 60:
+            preview = preview[:57] + "..."
+        results.append((sim, start_offset, end_offset, s, e, preview))
+
+    return results
+
+
+def _find_high_similarity_match(
+    doc: str, needle: str, threshold: float = 0.88, capture_newline: bool = False
+) -> tuple[int, int, int, int, float] | None:
+    """
+    Locates a uniquely matching line block with >= threshold structural similarity,
+    ignoring emojis, symbols, and minor attribute drifts.
+    Strictly refuses to match if multiple close candidates exist.
+    """
+    candidates = _find_high_similarity_candidates(
+        doc, needle, min_threshold=threshold, capture_newline=capture_newline
+    )
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    best_r, best_start, best_end = candidates[0]
-
+    best_sim, start_offset, end_offset, best_start, best_end, _ = candidates[0]
     best_range = set(range(best_start, best_end + 1))
-    for r, s, e in candidates[1:]:
+    for sim, _, _, s, e, _ in candidates[1:]:
         cand_range = set(range(s, e + 1))
-        if not cand_range.intersection(best_range) and r >= threshold - 0.05:
+        if not cand_range.intersection(best_range) and sim >= threshold - 0.05:
             return None
-
-    start_offset = offsets[best_start]
-    if capture_newline and best_end + 1 < len(offsets):
-        end_offset = offsets[best_end + 1]
-    else:
-        tail = doc_lines[best_end]
-        if tail.endswith("\r"):
-            tail = tail[:-1]
-        end_offset = offsets[best_end] + len(tail)
-    return (start_offset, end_offset, best_start, best_end, best_r)
+    return (start_offset, end_offset, best_start, best_end, best_sim)
 
 
 def _tokenize_python_line(line_str: str) -> list[tuple[int, str]]:
@@ -594,18 +735,70 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
             raise _format_spans_error(err_prefix, target, js_spans)
         _verbose_note(f"Tier 6b (JS/TS tokens): no match in {target}")
 
-    # ---- Tier 7: High-similarity fuzzy match (>= 90%) ----
-    fuzzy = _find_high_similarity_match(doc, needle, threshold=0.90, capture_newline=capture_nl)
-    if fuzzy is not None:
-        start, end, s_line, e_line, sim = fuzzy
-        pct = int(sim * 100)
-        if pct < 100:
-            ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {s_line + 1}-{e_line + 1}")
-            note = f" (fuzzy matched with {pct}% similarity)"
+    # ---- Tier 7: Dual-Threshold Fuzzy Matching ----
+    candidates_raw = _find_high_similarity_candidates(
+        doc, needle, min_threshold=RESOLVER_THRESHOLD, capture_newline=capture_nl
+    )
+    candidates = [
+        FuzzyCandidate(
+            similarity=sim,
+            start=s_off,
+            end=e_off,
+            start_line=s_line,
+            end_line=e_line,
+            preview=prev,
+        )
+        for sim, s_off, e_off, s_line, e_line, prev in candidates_raw
+    ]
+
+    if candidates:
+        best = candidates[0]
+        pct = int(best.similarity * 100)
+
+        # Disambiguation check: multiple competing candidates
+        competing = [
+            c for c in candidates[1:]
+            if c.similarity >= RESOLVER_THRESHOLD and (best.similarity - c.similarity) < 0.10
+        ]
+        if competing:
+            _verbose_note(f"Tier 7 (fuzzy ambiguity): {len(candidates)} candidates found in {target}")
+            if FUZZY_RESOLVER is not None:
+                resolved = FUZZY_RESOLVER(target, needle, candidates)
+                if resolved is not None:
+                    return resolved
+            cand_locs = ", ".join(f"lines {c.start_line + 1}-{c.end_line + 1} ({int(c.similarity * 100)}%)" for c in candidates[:4])
+            raise OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|matched {len(candidates)} fuzzy candidates at [{cand_locs}]")
+
+        # Single dominant candidate: Confident Zone vs Resolver Zone
+        if best.similarity >= CONFIDENT_THRESHOLD:
+            if pct < 100:
+                ui.warn(f"Fuzzy match ({pct}% similarity) accepted for {target} at lines {best.start_line + 1}-{best.end_line + 1}")
+                note = f" (fuzzy matched with {pct}% similarity)"
+            else:
+                note = " (matched ignoring non-standard symbols)"
+            _verbose_note(f"Tier 7 (fuzzy confident {pct}%): matched {target} at lines {best.start_line + 1}-{best.end_line + 1}")
+            return MatchResult(best.start, best.end, note, True, (best.start_line, best.end_line), similarity=best.similarity, candidates=candidates)
+
         else:
-            note = " (matched ignoring non-standard symbols)"
-        _verbose_note(f"Tier 7 (fuzzy {pct}%): matched {target} at lines {s_line + 1}-{e_line + 1}")
-        return MatchResult(start, end, note, True, (s_line, e_line))
+            # Resolver Zone (RESOLVER_THRESHOLD <= similarity < CONFIDENT_THRESHOLD)
+            _verbose_note(f"Tier 7 (fuzzy borderline {pct}%): candidate found at lines {best.start_line + 1}-{best.end_line + 1}")
+            if FUZZY_RESOLVER is not None:
+                resolved = FUZZY_RESOLVER(target, needle, [best])
+                if resolved is not None:
+                    return resolved
+                else:
+                    raise OpError(f"ERR|{err_prefix}_FUZZY_REJECTED|{target} - rejected candidate at lines {best.start_line + 1}-{best.end_line + 1} ({pct}% similarity)")
+            elif FUZZY_POLICY == "auto":
+                ui.warn(f"🛡️ Borderline fuzzy match ({pct}% similarity) auto-accepted for {target} at lines {best.start_line + 1}-{best.end_line + 1}")
+                note = f" (auto-accepted borderline fuzzy match with {pct}% similarity)"
+                return MatchResult(best.start, best.end, note, True, (best.start_line, best.end_line), similarity=best.similarity, candidates=candidates)
+            else:
+                # Strict / Non-interactive: provide clear diagnostic guidance
+                diagnostic = _find_closest_match(doc, needle)
+                raise OpError(
+                    f"ERR|{err_prefix}_NOT_FOUND|{target} (candidate found at lines {best.start_line + 1}-{best.end_line + 1} with {pct}% similarity, below {int(CONFIDENT_THRESHOLD * 100)}% threshold).{diagnostic}"
+                )
+
     _verbose_note(f"Tier 7 (fuzzy): no match in {target}")
 
     # ---- Tier 8: Boundary anchor last-resort (for blocks that slipped past Tier 0) ----

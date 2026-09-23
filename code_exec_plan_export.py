@@ -218,6 +218,341 @@ def estimate_tokens(text: str) -> int:
     return max(words, int(chars / 3.8))
 
 
+def _extract_go_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+    in_import_block = False
+    in_const_var_block = False
+    import_count = 0
+
+    fn_pattern = re.compile(r"^func\s+(?:\([^)]+\)\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)")
+    type_pattern = re.compile(r"^type\s+([A-Za-z0-9_]+)\s+(struct|interface|[A-Za-z0-9_*\[\]]+)")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("package "):
+            out_lines.append(ln.rstrip())
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("import ("):
+            in_import_block = True
+            out_lines.append("import ( ... )")
+            curr_doc.clear()
+            continue
+        if in_import_block:
+            if ln.startswith(")"):
+                in_import_block = False
+            continue
+        if ln.startswith("import "):
+            if import_count == 0:
+                out_lines.append(ln.rstrip())
+            import_count += 1
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("const (") or ln.startswith("var ("):
+            in_const_var_block = True
+            out_lines.append(f"{ln.split()[0]} ( ... )")
+            curr_doc.clear()
+            continue
+        if in_const_var_block:
+            if ln.startswith(")"):
+                in_const_var_block = False
+            continue
+
+        if ln and not ln[0].isspace():
+            m_fn = fn_pattern.match(ln)
+            if m_fn:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            m_type = type_pattern.match(ln)
+            if m_type:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            if ln.startswith("const ") or ln.startswith("var "):
+                out_lines.append(f"{ln.rstrip()} (line {idx})")
+                curr_doc.clear()
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_rust_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    decl_pattern = re.compile(
+        r"^(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(fn|struct|enum|trait|type|impl|mod|const|static)\s+([A-Za-z0-9_]+)?"
+    )
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("///") or ln.startswith("//!"):
+            curr_doc.append(raw_stripped)
+            continue
+        if ln.startswith("#["):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("use ") or (ln.startswith("pub use ") and ";" in ln):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and not ln[0].isspace():
+            m = decl_pattern.match(ln)
+            if m:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_jvm_csharp_skeleton(rel_name: str, lines: list[str], suffix: str) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+    in_block_doc = False
+
+    class_pattern = re.compile(
+        r"^(?:(?:public|protected|private|internal|abstract|final|sealed|static|open|data|value)\s+)*(class|interface|enum|record|object|trait|struct)\s+([A-Za-z0-9_]+)"
+    )
+    method_pattern = re.compile(
+        r"^(?:(?:public|protected|private|internal|abstract|final|static|override|virtual|suspend|async|inline)\s+)*(?:fun\s+([A-Za-z0-9_]+)|(?:[A-Za-z0-9_<>,\[\]?]+)\s+([A-Za-z0-9_]+)\s*\([^)]*\))"
+    )
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("/**") or (in_block_doc and ln.startswith(" *")):
+            in_block_doc = True
+            curr_doc.append(raw_stripped)
+            continue
+        if in_block_doc and (ln.startswith(" */") or raw_stripped.endswith("*/")):
+            curr_doc.append(raw_stripped)
+            in_block_doc = False
+            continue
+        if ln.startswith("///"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("package ") or ln.startswith("namespace ") or ln.startswith("import ") or ln.startswith("using "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln.startswith("@") or (suffix == ".cs" and ln.startswith("[") and ln.endswith("]")):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("    ") or ln.startswith("\t")):
+            indent = "    " if (ln.startswith("    ") or ln.startswith("\t")) else ""
+            m_class = class_pattern.match(raw_stripped)
+            if m_class:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+            m_method = method_pattern.match(raw_stripped)
+            if m_method and ("(" in raw_stripped and ")" in raw_stripped):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped and not in_block_doc:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_c_cpp_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    type_pattern = re.compile(r"^(?:typedef\s+)?(struct|class|enum|union)\s+([A-Za-z0-9_]+)?")
+    func_pattern = re.compile(r"^(?:[A-Za-z0-9_*&:]+\s+)+([A-Za-z0-9_:]+)\s*\([^)]*\)\s*(?:const)?\s*(?:noexcept)?\s*[{;]?")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//") or ln.startswith("/*") or ln.startswith(" *"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("#include") or ln.startswith("#define"):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and not ln[0].isspace():
+            m_type = type_pattern.match(ln)
+            if m_type:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-4:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+            m_func = func_pattern.match(ln)
+            if m_func and ("(" in ln and ")" in ln):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                sig = ln.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_ruby_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"# Skeleton: {rel_name} ({len(lines)} lines)",
+        f"# Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("#"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("require ") or ln.startswith("require_relative "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("  ") or ln.startswith("\t")):
+            indent = "  " if (ln.startswith("  ") or ln.startswith("\t")) else ""
+            if raw_stripped.startswith("class ") or raw_stripped.startswith("module "):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                out_lines.append(f"{indent}{raw_stripped} ... (line {idx})")
+                continue
+            if raw_stripped.startswith("def "):
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                out_lines.append(f"{indent}{raw_stripped} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n# ... [{len(lines)} total lines]\n"
+    return None
+
+
+def _extract_php_skeleton(rel_name: str, lines: list[str]) -> str | None:
+    out_lines = [
+        f"// Skeleton: {rel_name} ({len(lines)} lines)",
+        f"// Use 'FETCH {rel_name}:<start>-<end>' to inspect full implementation\n",
+    ]
+    curr_doc: list[str] = []
+
+    decl_pattern = re.compile(r"^(?:(?:final|abstract|readonly)\s+)?(class|interface|trait|enum)\s+([A-Za-z0-9_]+)")
+    func_pattern = re.compile(r"^(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+([A-Za-z0-9_]+)\s*\([^)]*\)")
+
+    for idx, ln in enumerate(lines, 1):
+        raw_stripped = ln.strip()
+
+        if ln.startswith("//") or ln.startswith("/*") or ln.startswith(" *") or ln.startswith("#"):
+            curr_doc.append(raw_stripped)
+            continue
+
+        if ln.startswith("<?php") or ln.startswith("namespace ") or ln.startswith("use "):
+            out_lines.append(raw_stripped)
+            curr_doc.clear()
+            continue
+
+        if ln and (not ln[0].isspace() or ln.startswith("    ") or ln.startswith("\t")):
+            indent = "    " if (ln.startswith("    ") or ln.startswith("\t")) else ""
+            m_decl = decl_pattern.match(raw_stripped)
+            if m_decl:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-3:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+            m_func = func_pattern.match(raw_stripped)
+            if m_func:
+                if curr_doc:
+                    out_lines.extend(curr_doc[-2:])
+                    curr_doc.clear()
+                sig = raw_stripped.split("{")[0].split(";")[0].rstrip()
+                out_lines.append(f"{indent}{sig} ... (line {idx})")
+                continue
+
+        if raw_stripped:
+            curr_doc.clear()
+
+    if len(out_lines) > 2:
+        return "\n".join(out_lines) + f"\n\n// ... [{len(lines)} total lines]\n"
+    return None
+
+
 def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
     """Generates a compact structural outline of a file to minimize prompt tokens."""
     try:
@@ -265,6 +600,42 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
                 return "\n".join(skel_lines) + "\n"
         except Exception:
             pass
+
+    # Go: package, types, funcs, methods
+    if suffix == ".go":
+        res = _extract_go_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Rust: use, structs, enums, traits, impls, fns
+    if suffix == ".rs":
+        res = _extract_rust_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Java, Kotlin, C#
+    if suffix in {".java", ".kt", ".kts", ".cs"}:
+        res = _extract_jvm_csharp_skeleton(rel_name, lines, suffix)
+        if res:
+            return res
+
+    # C, C++
+    if suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx"}:
+        res = _extract_c_cpp_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # Ruby
+    if suffix == ".rb":
+        res = _extract_ruby_skeleton(rel_name, lines)
+        if res:
+            return res
+
+    # PHP
+    if suffix == ".php":
+        res = _extract_php_skeleton(rel_name, lines)
+        if res:
+            return res
 
     # JavaScript / TypeScript / React JSX & TSX signature extraction
     if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
@@ -344,11 +715,12 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
 
 
 def ensure_gitignore_entry(root: Path, entry: str) -> bool:
-    """Ensures an entry (e.g. 'context/') is present in the project's .gitignore."""
+    """Ensures an entry (e.g. 'context/' or 'PROJECT_CONTEXT.md') is present in the project's .gitignore."""
     gitignore_path = root / ".gitignore"
     clean_entry = entry.strip()
-    clean_dir = clean_entry.rstrip("/") + "/"
-    entry_variants = {clean_entry, clean_dir, "/" + clean_entry, "/" + clean_dir}
+    is_file = clean_entry.endswith(".md") or (root / clean_entry).is_file()
+    clean_formatted = clean_entry.rstrip("/") if is_file else (clean_entry.rstrip("/") + "/")
+    entry_variants = {clean_entry, clean_formatted, "/" + clean_entry, "/" + clean_formatted}
 
     if gitignore_path.is_file():
         try:
@@ -358,14 +730,14 @@ def ensure_gitignore_entry(root: Path, entry: str) -> bool:
                     return False  # Already present
             # Append entry cleanly
             delimiter = "" if content.endswith("\n") or not content else "\n"
-            gitignore_path.write_text(f"{content}{delimiter}{clean_dir}\n", encoding="utf-8")
+            gitignore_path.write_text(f"{content}{delimiter}{clean_formatted}\n", encoding="utf-8")
             return True
         except OSError:
             return False
     elif (root / ".git").exists():
         # Git repository exists but no .gitignore yet: create one
         try:
-            gitignore_path.write_text(f"{clean_dir}\n", encoding="utf-8")
+            gitignore_path.write_text(f"{clean_formatted}\n", encoding="utf-8")
             return True
         except OSError:
             return False
@@ -395,9 +767,15 @@ def create_plan_folder(
 
     patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
 
-    # 1. Immediately wipe any existing context folder first to avoid scanning old exports
+    # 1. Immediately wipe any existing context folder and bundle file first to avoid scanning old exports
     if target_dir.exists():
         shutil.rmtree(target_dir, ignore_errors=True)
+    stale_bundle = root / "PROJECT_CONTEXT.md"
+    if stale_bundle.exists():
+        try:
+            stale_bundle.unlink()
+        except OSError:
+            pass
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Collect candidate files from clean workspace
@@ -498,3 +876,135 @@ def create_plan_folder(
         "ignore_file": used_ignore,
         "compact": compact,
     }
+
+
+def create_plan_bundle(
+    plan_text: str | None = None,
+    output_file: str = "PROJECT_CONTEXT.md",
+    ignore_filename: str | None = ".code-exec-ignore",
+    root: Path | None = None,
+    export_all: bool = True,
+    compact: bool = True,
+) -> dict[str, int | str | bool]:
+    """
+    Creates a single consolidated markdown bundle (PROJECT_CONTEXT.md) containing
+    a directory outline, compact file skeletons, and AI instructions.
+    Ideal for single-file drag-and-drop into chat LLMs (Claude, ChatGPT, etc.).
+    """
+    if root is None:
+        root = Path.cwd().resolve()
+    target_path = root / output_file
+
+    ensure_gitignore_entry(root, ".code_exec")
+    ensure_gitignore_entry(root, output_file)
+
+    patterns, used_ignore = load_ignore_patterns(root, ignore_filename)
+
+    # 1. Immediately wipe any existing context folder and target bundle file to avoid scanning old exports
+    context_dir = root / "context"
+    if context_dir.exists():
+        shutil.rmtree(context_dir, ignore_errors=True)
+    if target_path.exists():
+        try:
+            target_path.unlink()
+        except OSError:
+            pass
+
+    # 2. Collect candidate files from clean workspace
+    candidate_files: list[Path] = []
+    requested_paths = extract_files_from_plan(plan_text or "") if not export_all else []
+
+    if requested_paths:
+        for p_str in requested_paths:
+            p = root / p_str
+            if p.is_file():
+                candidate_files.append(p)
+            elif p.is_dir():
+                for sub in p.rglob("*"):
+                    if sub.is_file():
+                        candidate_files.append(sub)
+
+        for manifest in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "README.md"):
+            m_path = root / manifest
+            if m_path.is_file() and m_path not in candidate_files:
+                candidate_files.append(m_path)
+    else:
+        for p in root.rglob("*"):
+            try:
+                if p.resolve() == target_path.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                pass
+            if p.is_file():
+                candidate_files.append(p)
+
+    included_files: list[Path] = []
+    ignored_count = 0
+
+    for file_path in candidate_files:
+        try:
+            rel_path = file_path.relative_to(root)
+        except ValueError:
+            continue
+
+        if is_path_ignored(rel_path, is_dir=False, patterns=patterns):
+            ignored_count += 1
+            continue
+
+        included_files.append(file_path)
+
+    included_files.sort(key=lambda p: p.relative_to(root).as_posix())
+
+    bundle_sections = [
+        f"# Project Context: {root.name}",
+        "",
+        "> Auto-generated by `code-exec export-context --bundle`.",
+        "> When generating code changes, respond with a single fenced ````code_exec```` block.",
+        "",
+        "## File Index",
+        "",
+        "| Path | Mode |",
+        "| :--- | :--- |",
+    ]
+
+    for fp in included_files:
+        rel_posix = fp.relative_to(root).as_posix()
+        mode_str = "Skeleton" if compact else "Full"
+        bundle_sections.append(f"| `{rel_posix}` | {mode_str} |")
+
+    bundle_sections.append("")
+    bundle_sections.append("---")
+    bundle_sections.append("")
+
+    for fp in included_files:
+        rel_posix = fp.relative_to(root).as_posix()
+        if compact:
+            body = generate_skeleton(fp)
+        else:
+            try:
+                body = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                body = ""
+
+        fence = "```"
+        ext = fp.suffix.lstrip(".").lower() or "text"
+        bundle_sections.append(f"### File: `{rel_posix}`")
+        bundle_sections.append(f"{fence}{ext}\n{body}\n{fence}")
+        bundle_sections.append("")
+
+    content = "\n".join(bundle_sections)
+    target_path.write_text(content, encoding="utf-8")
+    total_tokens = estimate_tokens(content)
+    total_bytes = len(content.encode("utf-8"))
+
+    return {
+        "location": output_file,
+        "included": len(included_files),
+        "ignored": ignored_count,
+        "tokens": total_tokens,
+        "size_kb": round(total_bytes / 1024, 1),
+        "ignore_file": used_ignore,
+        "compact": compact,
+        "bundle": True,
+    }
+

@@ -27,6 +27,7 @@ CORE_MODULES = [
     "code_exec_plan_export.py",
     "code_exec_updater.py",
     "code_exec_instructions.md",
+    "code_exec_instructions_short.md",
     "pyproject.toml",
 ]
 
@@ -107,6 +108,29 @@ def update_code_exec(target_dir: Path | None = None) -> bool:
     if ans not in {"y", "yes"}:
         print(c.paint("  Update cancelled.\n", c.SLATE))
         return False
+
+    # Check if installed via pipx or uv tool
+    if "pipx" in sys.prefix:
+        print(c.paint("  Detected pipx environment. Upgrading via pipx...", c.SLATE))
+        try:
+            res = subprocess.run(["pipx", "upgrade", "code-exec"], capture_output=True, text=True, check=True)
+            print(c.paint(f"  ✔ {res.stdout.strip()}", c.GREEN))
+            print(c.paint(f"\n  ✨ code-exec successfully updated!\n", c.GREEN, bold=True))
+            return True
+        except Exception as exc:
+            ui.error(f"ERR|PIPX_UPGRADE_FAILED|{exc}")
+            return False
+
+    if "uv/tools" in sys.prefix or "uv" in sys.prefix:
+        print(c.paint("  Detected uv tool environment. Upgrading via uv tool...", c.SLATE))
+        try:
+            res = subprocess.run(["uv", "tool", "upgrade", "code-exec"], capture_output=True, text=True, check=True)
+            print(c.paint(f"  ✔ {res.stdout.strip()}", c.GREEN))
+            print(c.paint(f"\n  ✨ code-exec successfully updated!\n", c.GREEN, bold=True))
+            return True
+        except Exception as exc:
+            ui.error(f"ERR|UV_UPGRADE_FAILED|{exc}")
+            return False
 
     if (install_dir / ".git").exists():
         print(c.paint(f"  Updating git repository at {install_dir}...", c.SLATE))

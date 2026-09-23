@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path.cwd().resolve()
@@ -114,12 +114,24 @@ class Unverifiable(Exception):
 # ============================================================
 
 @dataclass
+class FuzzyCandidate:
+    similarity: float
+    start: int
+    end: int
+    start_line: int
+    end_line: int
+    preview: str = ""
+
+
+@dataclass
 class MatchResult:
     start: int
     end: int
     note: str
     fuzzy: bool
     line_range: tuple[int, int] | None = None
+    similarity: float = 1.0
+    candidates: list[FuzzyCandidate] = field(default_factory=list)
 
 
 @dataclass

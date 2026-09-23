@@ -46,6 +46,7 @@ from code_exec_types import (
     PROTECTED_SUFFIXES,
     SHELL_CHAINING_OPERATORS,
     CommandFailed,
+    FuzzyCandidate,
     MatchResult,
     OpError,
     Operation,
@@ -62,12 +63,16 @@ from code_exec_sandbox import (
 
 # Re-export matching engine
 from code_exec_matcher import (
+    CONFIDENT_THRESHOLD,
+    RESOLVER_THRESHOLD,
     _adjust_indentation,
     _find_closest_match,
+    _find_high_similarity_candidates,
     _find_high_similarity_match,
     _get_leading_indent,
     _match_line_spans,
     _normalize_jsx_line,
+    _semantic_similarity,
     _strip_symbols_and_emojis,
     apply_unified_patch,
     find_all,
@@ -101,6 +106,122 @@ from code_exec_fs import (
     undo_last_run,
     with_newlines,
 )
+
+# Audit log of fuzzy match resolutions applied in the current run
+AUDIT_FUZZY_RESOLUTIONS: list[tuple[str, tuple[int, int] | None, float]] = []
+
+
+def validate_fuzzy_replacement_safety(
+    target: str,
+    old_doc: str,
+    new_doc: str,
+    match: MatchResult,
+) -> None:
+    """
+    🛡️ Guardrails Pre-Validation:
+    Verifies that a fuzzy replacement does not corrupt file syntax or balance.
+    Checks:
+    - Python AST parsing for .py/.pyi files
+    - JSON parsing for .json files
+    - Bracket/brace balance for JS/TS/C/Go/Rust
+    """
+    target_lower = target.lower()
+
+    # 1. Python AST verification
+    if target_lower.endswith((".py", ".pyi")):
+        import ast
+        try:
+            ast.parse(new_doc, filename=target)
+        except SyntaxError as new_exc:
+            is_old_valid = True
+            try:
+                ast.parse(old_doc, filename=target)
+            except SyntaxError:
+                is_old_valid = False
+            if is_old_valid:
+                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+                raise OpError(
+                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke Python syntax: {new_exc.msg} (line {new_exc.lineno})"
+                )
+
+    # 2. JSON verification
+    elif target_lower.endswith(".json"):
+        import json
+        try:
+            json.loads(new_doc)
+        except Exception as new_exc:
+            is_old_valid = True
+            try:
+                json.loads(old_doc)
+            except Exception:
+                is_old_valid = False
+            if is_old_valid:
+                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+                raise OpError(
+                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke JSON syntax: {new_exc}"
+                )
+
+    # 3. Bracket/brace balance verification
+    elif target_lower.endswith((".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c", ".cpp", ".java")):
+        def _count_brackets(text: str) -> tuple[int, int, int]:
+            s = re.sub(r"//.*$", "", text, flags=re.MULTILINE)
+            s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
+            s = re.sub(r'"(?:\\.|[^"\\])*"', "", s)
+            s = re.sub(r"'(?:\\.|[^'\\])*'", "", s)
+            s = re.sub(r"`(?:\\.|[^`\\])*`", "", s)
+            curly = s.count("{") - s.count("}")
+            square = s.count("[") - s.count("]")
+            paren = s.count("(") - s.count(")")
+            return curly, square, paren
+
+        old_b = _count_brackets(old_doc)
+        new_b = _count_brackets(new_doc)
+        if old_b == (0, 0, 0) and new_b != (0, 0, 0):
+            diffs = []
+            if new_b[0] != 0:
+                diffs.append(f"curly brace {'unclosed' if new_b[0] > 0 else 'extra closing'} ({abs(new_b[0])})")
+            if new_b[1] != 0:
+                diffs.append(f"square bracket {'unclosed' if new_b[1] > 0 else 'extra closing'} ({abs(new_b[1])})")
+            if new_b[2] != 0:
+                diffs.append(f"parenthesis {'unclosed' if new_b[2] > 0 else 'extra closing'} ({abs(new_b[2])})")
+            line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
+            raise OpError(
+                f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke bracket balance: {', '.join(diffs)}"
+            )
+
+
+def interactive_fuzzy_resolver(target: str, needle: str, candidates: list[FuzzyCandidate]) -> MatchResult | None:
+    """Resolver callback connected to code_exec_matcher.FUZZY_RESOLVER."""
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        chosen = ui.resolve_fuzzy_ambiguity(target, candidates)
+        if chosen is None:
+            return None
+        cand = chosen
+    else:
+        cand = candidates[0]
+
+    try:
+        doc = (ROOT / target).read_text(encoding="utf-8")
+        doc_lines = doc.split("\n")
+    except Exception:
+        doc_lines = []
+
+    accepted = ui.resolve_fuzzy_match(target, needle, doc_lines, cand)
+    if accepted:
+        pct = int(cand.similarity * 100)
+        note = f" (interactively resolved fuzzy match with {pct}% similarity)"
+        return MatchResult(
+            cand.start,
+            cand.end,
+            note,
+            fuzzy=True,
+            line_range=(cand.start_line, cand.end_line),
+            similarity=cand.similarity,
+            candidates=candidates,
+        )
+    return None
 
 
 
@@ -163,6 +284,9 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
                 replacement = _adjust_indentation(doc, match.line_range, op.data, replacement, newline)
 
             new = doc[: match.start] + replacement + doc[match.end :]
+            if match.fuzzy:
+                validate_fuzzy_replacement_safety(args[0], doc, new, match)
+                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
             done = "Edited"
 
@@ -191,6 +315,9 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
             else:
                 new = doc[: match.end] + newline + content_clean + doc[match.end :]
                 done = "Inserted after marker in"
+            if match.fuzzy:
+                validate_fuzzy_replacement_safety(args[0], doc, new, match)
+                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
 
         elif command == "APPEND":
@@ -447,6 +574,12 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 execute(op, vfs)
             except Exception:
                 pass
+        elif cmd == "COPY":
+            diff_lines.append(f"--- /dev/null\n+++ b/{op.args[1]}\n@@ copy from {op.args[0]} @@\n")
+            try:
+                execute(op, vfs)
+            except Exception:
+                pass
     return "".join(diff_lines)
 
 
@@ -472,7 +605,13 @@ def preflight(operations: list[Operation]) -> tuple[str | None, int, dict]:
         if op.command == "RUN":
             validate_run_command(op.args[0])
         elif op.command not in {"RUN", "COMMIT"}:
-            args_to_check = (op.args[0],) if op.command in {"FETCH", "CHMOD"} else op.args
+            args_to_check = []
+            for idx, path_arg in enumerate(op.args):
+                if op.command in {"FETCH", "CHMOD"} and idx > 0:
+                    continue
+                if idx == 0 and op.command in {"MOVE", "COPY"} and (any(ch in path_arg for ch in ("*", "?", "[")) or path_arg.startswith("regex:")):
+                    continue
+                args_to_check.append(path_arg)
             for path_arg in args_to_check:
                 path_str = str(safe_path(path_arg, follow_leaf=False))
                 history = file_history.setdefault(path_str, [])
@@ -1017,6 +1156,7 @@ def copy_verification_error_to_clipboard(cmd: str, returncode: int, output: str,
 
 
 def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = False, auto_commit: bool = False, dry_run: bool = False, match_cache: dict | None = None, verify_cmd: str | None = None) -> int:
+    AUDIT_FUZZY_RESOLUTIONS.clear()
     fetch_ops = [op for op in operations if op.command == "FETCH"]
     exec_ops = [op for op in operations if op.command not in {"COMMIT", "FETCH"}]
 
@@ -1037,7 +1177,6 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
             pass
     commit_op = next((op for op in operations if op.command == "COMMIT"), None)
     commit_msg = commit_op.args[0] if commit_op else None
-    ui.start_apply(len(exec_ops))
     ui.start_apply(len(exec_ops))
     modified_paths: list[str] = []
 
@@ -1061,7 +1200,10 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
                 if op.command in {"CREATE", "EDIT", "DELETE", "APPEND", "PREPEND", "INSERT_BEFORE", "INSERT_AFTER", "REPLACE_ALL", "TOUCH", "CHMOD", "PATCH", "MKDIR"}:
                     modified_paths.append(op.args[0])
                 elif op.command in {"MOVE", "COPY", "RENAME"}:
-                    modified_paths.extend([op.args[0], op.args[1]])
+                    src_arg = op.args[0]
+                    if not (any(ch in src_arg for ch in ("*", "?", "[")) or src_arg.startswith("regex:")):
+                        modified_paths.append(src_arg)
+                    modified_paths.append(op.args[1])
 
     except CommandFailed as exc:
         copy_error_to_clipboard(str(exc))
@@ -1085,6 +1227,8 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
     fs.save_backup_manifest()
     ui.done()
+    if AUDIT_FUZZY_RESOLUTIONS:
+        ui.fuzzy_audit_summary(AUDIT_FUZZY_RESOLUTIONS)
 
     # Post-apply verification hook (--verify)
     if verify_cmd:
@@ -1131,6 +1275,7 @@ def apply_plan(operations: list[Operation], timeout: int, no_commit: bool = Fals
 
 
 def main(argv=None) -> int:
+    global ROOT
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
@@ -1189,11 +1334,41 @@ def main(argv=None) -> int:
                         help="Show which matching tier was used for each SEARCH block")
     parser.add_argument("--short", action="store_true",
                         help="With -p: copy the compact instructions (for small/local models)")
+    parser.add_argument("-V", "--version", action="store_true",
+                        help="Show program's version number and exit")
+    parser.add_argument("-C", "--project-dir", dest="project_dir", default=None,
+                        help="Run as if code-exec was started in <path> instead of the current working directory")
+    parser.add_argument("-b", "--bundle", "--single-file", dest="bundle", action="store_true",
+                        help="Export a single consolidated markdown bundle (PROJECT_CONTEXT.md) and copy to clipboard")
+    parser.add_argument("-w", "--watch", dest="watch", action="store_true",
+                        help="Watch clipboard in background and auto-prompt when AI code plans are detected")
+    parser.add_argument("--install-completions", dest="install_completions", action="store_true",
+                        help="Install shell autocompletions for active shell (bash, zsh, fish)")
+    parser.add_argument("--full", action="store_true",
+                        help="Export full file contents in bundle instead of default compact skeletons")
     parser.add_argument("--verify", nargs="?", const="auto", default=None, metavar="CMD",
                         help="Run a verification command after applying (e.g. 'pytest'). "
                              "Pass 'auto' or omit the value to auto-detect from .code-exec-verify "
                              "or project type (package.json → npm test, etc.)")
+    parser.add_argument("--fuzzy", choices=["prompt", "strict", "auto"], default=None,
+                        help="Fuzzy matching resolution policy: prompt (interactive), strict (fail if <90%%), auto (accept >=72%%)")
     args = parser.parse_args(argv)
+
+    if args.version:
+        print("code-exec 1.3.0")
+        return 0
+
+    if args.project_dir:
+        target_root = Path(args.project_dir).resolve()
+        if not target_root.is_dir():
+            return fail(f"Specified project directory does not exist: {args.project_dir}")
+        os.chdir(target_root)
+        import code_exec_types
+        import code_exec_fs
+        code_exec_types.ROOT = target_root
+        code_exec_fs.ROOT = target_root
+        code_exec_fs.BACKUP_ROOT = target_root / ".code_exec" / "backups"
+        ROOT = target_root
 
     if args.action in {"1", "apply"}:
         args.action = "apply"
@@ -1224,7 +1399,23 @@ def main(argv=None) -> int:
     elif args.action in {"7", "commit-prompt", "docommit", "commit"}:
         args.commit_prompt = True
         args.action = None
-    elif args.action in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
+    elif args.action in {
+        "8",
+        "bundle",
+        "b",
+        "pack",
+        "outline",
+        "digest",
+        "export-bundle",
+        "export-context",
+        "export-concet",
+        "context",
+        "export-plan",
+        "plan-export",
+        "plan-only",
+    }:
+        if args.action in {"b", "bundle", "pack", "outline", "digest", "export-bundle"}:
+            args.bundle = True
         args.export_plan = True
         args.action = None
     elif args.action in {"fetch", "get", "read"}:
@@ -1264,6 +1455,24 @@ def main(argv=None) -> int:
             print(f"  Available themes: {', '.join(ui.palette.themes.keys())}")
             print("  Usage: code-exec theme <name>\n")
             return 0
+    elif args.action in {"watch", "listen", "-w"}:
+        args.watch = True
+        args.action = None
+    elif args.action in {"completions", "completion"}:
+        from code_exec_completions import generate_bash_completions, generate_zsh_completions, generate_fish_completions
+        sh = (args.subarg or "").lower()
+        if sh == "bash":
+            print(generate_bash_completions())
+        elif sh == "fish":
+            print(generate_fish_completions())
+        elif sh in {"zsh", ""}:
+            print(generate_zsh_completions())
+        else:
+            return fail(f"Unsupported shell '{sh}'. Choose: zsh, bash, fish")
+        return 0
+    elif args.action in {"install-completions", "install-completion"}:
+        args.install_completions = True
+        args.action = None
     elif args.action and not args.file and not Path(args.action).exists():
         return fail(f"Unknown command or file: '{args.action}'. Run 'code-exec' without arguments for the menu.")
 
@@ -1284,6 +1493,9 @@ def main(argv=None) -> int:
         args.no_run,
         args.no_commit,
         args.export_plan,
+        args.bundle,
+        getattr(args, "watch", False),
+        getattr(args, "install_completions", False),
     ])
     if args.action is None and not has_flags and is_interactive:
         choice = ui.interactive_menu(ROOT)
@@ -1314,6 +1526,22 @@ def main(argv=None) -> int:
             args.commit_prompt = True
         elif choice in {"8", "export-context", "export-concet", "context", "export-plan", "plan-export", "plan-only"}:
             args.export_plan = True
+        elif choice in {"w", "watch"}:
+            args.watch = True
+        elif choice in {"b", "bundle", "pack", "outline", "digest"}:
+            args.export_plan = True
+            args.bundle = True
+        elif choice in {"9", "short-prompt"}:
+            args.prompt = True
+            args.short = True
+        elif choice in {"t", "theme", "themes"}:
+            themes = list(ui.palette.themes.keys())
+            curr = ui.palette.current_theme
+            idx = (themes.index(curr) + 1) % len(themes)
+            next_t = themes[idx]
+            ui.palette.set_theme(next_t)
+            print(f"\n  ✨ Theme switched to '{next_t}'!\n")
+            return 0
         else:
             ui.error(f"Invalid option: {choice}")
             return 1
@@ -1322,17 +1550,72 @@ def main(argv=None) -> int:
         ui.show_guide()
         return 0
 
+    if getattr(args, "install_completions", False):
+        from code_exec_completions import install_completions
+        ok, shell_name, msg = install_completions(args.subarg)
+        if ok:
+            ui.completions_installed(shell_name, msg)
+            return 0
+        return fail(f"Could not install completions: {msg}")
+
+    if getattr(args, "watch", False):
+        from code_exec_watch import watch_clipboard
+        return watch_clipboard(
+            args,
+            ROOT,
+            ui,
+            preflight_fn=preflight,
+            apply_plan_fn=apply_plan,
+            generate_diff_fn=generate_plan_diff,
+        )
+
     if args.export_plan:
-        from code_exec_plan_export import create_plan_folder
+        from code_exec_plan_export import create_plan_folder, create_plan_bundle
         try:
-            target_out = args.target_dir or "context"
-            res = create_plan_folder(
-                export_all=True,
-                output_dirname=target_out,
-                ignore_filename=args.ignore_file,
-                root=Path.cwd().resolve(),
-                compact=args.compact,
-            )
+            copied_clip = False
+            bundle_file_path = None
+            if getattr(args, "bundle", False):
+                bundle_file = "PROJECT_CONTEXT.md"
+                compact_mode = not getattr(args, "full", False)
+                res = create_plan_bundle(
+                    export_all=True,
+                    output_file=bundle_file,
+                    ignore_filename=args.ignore_file,
+                    root=Path.cwd().resolve(),
+                    compact=compact_mode,
+                )
+                try:
+                    bundle_path = Path.cwd().resolve() / bundle_file
+                    if bundle_path.is_file():
+                        tokens = int(res.get("tokens", 0))
+                        MAX_CLIPBOARD_TOKENS = 18000
+                        MAX_CLIPBOARD_BYTES = 75 * 1024
+                        file_bytes = bundle_path.stat().st_size
+                        # If file is too large (like commit diff / fetched context), place file in clipboard
+                        if tokens > MAX_CLIPBOARD_TOKENS or file_bytes > MAX_CLIPBOARD_BYTES:
+                            copied_file = set_clipboard_file(bundle_path)
+                            if copied_file:
+                                bundle_file_path = bundle_path
+                                copied_clip = True
+                            else:
+                                set_clipboard(bundle_path.read_text(encoding="utf-8"))
+                                copied_clip = True
+                        else:
+                            # Small file: place both file object and full text
+                            set_clipboard_file(bundle_path)
+                            set_clipboard(bundle_path.read_text(encoding="utf-8"))
+                            copied_clip = True
+                except Exception:
+                    pass
+            else:
+                target_out = args.target_dir or "context"
+                res = create_plan_folder(
+                    export_all=True,
+                    output_dirname=target_out,
+                    ignore_filename=args.ignore_file,
+                    root=Path.cwd().resolve(),
+                    compact=args.compact,
+                )
             ui.plan_export_success(
                 location=str(res["location"]),
                 included=int(res["included"]),
@@ -1341,10 +1624,12 @@ def main(argv=None) -> int:
                 tokens=int(res.get("tokens", 0)),
                 size_kb=float(res.get("size_kb", 0.0)),
                 compact=bool(res.get("compact", False)),
+                copied_to_clipboard=copied_clip,
+                file_path=bundle_file_path,
             )
             return 0
         except Exception as exc:
-            return fail(f"Could not export context folder: {exc}")
+            return fail(f"Could not export context: {exc}")
 
     if args.commit_prompt:
         try:
@@ -1355,7 +1640,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.prompt:
-        instructions_path = Path(__file__).resolve().parent / "code_exec_instructions.md"
+        filename = "code_exec_instructions_short.md" if getattr(args, "short", False) else "code_exec_instructions.md"
+        instructions_path = Path(__file__).resolve().parent / filename
         if not instructions_path.is_file():
             return fail(f"Instructions file not found: {instructions_path.name} (checked {instructions_path.parent})")
         try:
@@ -1393,8 +1679,8 @@ def main(argv=None) -> int:
 
     if args.timeout < 0:
         parser.error("--timeout must be >= 0")
-    if args.file == "-" and not (args.yes or args.dry_run):
-        return fail("Reading the plan from stdin requires --yes or --dry-run "
+    if args.file == "-" and not (args.yes or args.dry_run or args.check):
+        return fail("Reading the plan from stdin requires --yes, --dry-run, or --check "
                     "(stdin can't be used for the confirmation prompt).")
 
     try:
@@ -1433,9 +1719,18 @@ def main(argv=None) -> int:
         return fail("Plan contains RUN but --no-run was given. No files were modified.")
 
     # Wire --verbose into the matcher before plan execution
+    import code_exec_matcher as _matcher_mod
     if getattr(args, "verbose", False):
-        import code_exec_matcher as _matcher_mod
         _matcher_mod.VERBOSE = True
+
+    fuzzy_policy = getattr(args, "fuzzy", None) or os.environ.get("CODE_EXEC_FUZZY", "").strip().lower()
+    if not fuzzy_policy:
+        fuzzy_policy = "prompt" if is_interactive else "strict"
+    _matcher_mod.FUZZY_POLICY = fuzzy_policy
+    if fuzzy_policy == "prompt" and is_interactive:
+        _matcher_mod.FUZZY_RESOLVER = interactive_fuzzy_resolver
+    else:
+        _matcher_mod.FUZZY_RESOLVER = None
 
     try:
         reason, deferred, match_cache = preflight(operations)

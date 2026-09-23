@@ -437,12 +437,14 @@ class TerminalUI:
         lines.append(self._divider("Commands"))
         row("code-exec", "Open the interactive launcher menu", c.WHITE)
         row("code-exec apply", "Apply the plan from your clipboard", c.WHITE)
+        row("code-exec bundle", "Export single PROJECT_CONTEXT.md & copy to clipboard", c.WHITE)
         row("code-exec export-context", "Export clean context folder (files + tokens)", c.WHITE)
         row("code-exec undo", "Revert the last applied plan", c.WHITE)
         row("code-exec update", "Install the latest version from GitHub", c.WHITE)
         row("code-exec theme <name>", f"Set theme: {', '.join(c.themes)}", c.WHITE)
 
         lines.append(self._divider("Options"))
+        row("-b, --bundle", "Export single-file bundle & copy to clipboard", c.CYAN)
         row("--diff", "Show a unified diff before applying", c.CYAN)
         row("--tree", "Show the proposed folder/directory structure", c.CYAN)
         row("--dry-run", "Validate the plan without modifying files", c.CYAN)
@@ -488,9 +490,27 @@ class TerminalUI:
             path = "~" + path[len(home):]
         if len(path) > inner_w - 6:
             path = "…" + path[-(inner_w - 7):]
+
+        git_info = ""
+        git_dir = root / ".git"
+        if git_dir.exists():
+            try:
+                import subprocess
+                branch_res = subprocess.run(["git", "branch", "--show-current"], cwd=root, capture_output=True, text=True, timeout=2)
+                branch = branch_res.stdout.strip()
+                if branch:
+                    status_res = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True, timeout=2)
+                    dirty = len(status_res.stdout.strip().splitlines()) if status_res.stdout.strip() else 0
+                    stat_badge = f"{dirty} modified" if dirty else "clean"
+                    stat_color = c.AMBER if dirty else c.GREEN
+                    git_info = f"  {c.paint('⎇', c.CYAN)} {c.paint(branch, c.WHITE, bold=True)} ({c.paint(stat_badge, stat_color)})"
+            except Exception:
+                pass
+
+        proj_line = f"{c.paint('▸', c.CORAL)} {c.paint(path, c.WHITE, bold=True)}{git_info}"
         self.render_panel(
-            title=self._title("Project", "plain"),
-            lines=[self._line(f"{c.paint('▸', c.CORAL)} {c.paint(path, c.WHITE)}")],
+            title=self._title("Project", "brand"),
+            lines=[self._line(proj_line)],
         )
         print()
 
@@ -505,34 +525,45 @@ class TerminalUI:
         repo_url = "https://github.com/antonino54/code_exec"
         flow_lines = [
             "",
-            f"  {c.paint('Step 1', c.CORAL, bold=True)}  {c.paint('Copy Instructions', c.WHITE, bold=True)}   Run {c.paint('code-exec -p', c.CYAN)} (menu 3) to copy instructions",
-            f"  {c.paint('Step 2', c.CORAL, bold=True)}  {c.paint('Export Context', c.WHITE, bold=True)}      Run {c.paint('code-exec export-context --compact', c.CYAN)} (menu 8)",
-            f"  {c.paint('Step 3', c.CORAL, bold=True)}  {c.paint('Send to Any AI', c.WHITE, bold=True)}      Attach context/ & instructions into chat; ask for changes",
-            f"  {c.paint('Step 4', c.CORAL, bold=True)}  {c.paint('Apply Safely', c.WHITE, bold=True)}        Copy AI reply, then run {c.paint('code-exec', c.GREEN, bold=True)} (menu 1)",
+            f"  {c.paint('①', c.CORAL, bold=True)}  {c.paint('Export Context', c.WHITE, bold=True)}   Run {c.paint('code-exec bundle', c.CYAN, bold=True)} (menu b)",
+            f"     {c.paint('Creates PROJECT_CONTEXT.md & automatically copies it to your clipboard', c.SLATE)}",
+            "",
+            f"  {c.paint('②', c.CORAL, bold=True)}  {c.paint('Copy Prompt', c.WHITE, bold=True)}      Run {c.paint('code-exec -p', c.CYAN, bold=True)} (menu 3) or {c.paint('-p --short', c.CYAN, bold=True)} (menu 9)",
+            f"     {c.paint('Copies strict deterministic plan instructions to your clipboard', c.SLATE)}",
+            "",
+            f"  {c.paint('③', c.CORAL, bold=True)}  {c.paint('Send to Any AI', c.WHITE, bold=True)}   Attach bundle or Cmd+V directly into chat with instructions",
+            f"     {c.paint('Works with Claude, ChatGPT, Gemini, DeepSeek, and local LLMs', c.SLATE)}",
+            "",
+            f"  {c.paint('④', c.CORAL, bold=True)}  {c.paint('Apply Safely', c.WHITE, bold=True)}     Copy AI reply, then run {c.paint('code-exec apply', c.GREEN, bold=True)} (menu 1)",
+            f"     {c.paint('Validates in memory, previews unified diff, and commits atomically', c.SLATE)}",
             "",
             self._divider("Online Guide"),
-            f"  {c.paint('Web Docs:', c.SLATE)}  {c.paint(f'{repo_url}#readme', c.CYAN, bold=True)}  (Run {c.paint('code-exec docs', c.WHITE)})",
+            f"  {c.paint('Web Docs:', c.SLATE)}  {c.paint(f'{repo_url}#readme', c.CYAN, bold=True)}  {c.paint('(or run: code-exec docs)', c.SLATE)}",
             "",
         ]
-        self.render_panel(title=self._title("How it works", "info"), lines=flow_lines)
+        self.render_panel(title=self._title("4-Step AI Workflow", "info"), lines=flow_lines)
         print()
 
         # 2. Categorized Menu Options
-        lines = [self._divider("Apply & Validate")]
-        row_fmt = lambda key, label, desc, flag: f"  {c.paint(key, c.CORAL, bold=True)}  {c.paint(f'{label:<17}', c.WHITE, bold=True)}{c.paint(f'{desc:<28}', c.SLATE)}  {c.paint(flag, c.CYAN)}"
+        lines = [self._divider("Execution & Validation")]
+        row_fmt = lambda key, label, desc, flag: f"  {c.paint(key, c.CORAL, bold=True)}  {c.paint(f'{label:<17}', c.WHITE, bold=True)}{c.paint(f'{desc:<29}', c.SLATE)} {c.paint(flag, c.CYAN)}"
 
         lines.append(row_fmt("1", "Apply plan", "read clipboard & execute", "apply"))
+        lines.append(row_fmt("w", "Watch mode", "listen for clipboard plans", "watch"))
         lines.append(row_fmt("2", "Dry-run", "simulate without writing", "--dry-run"))
         lines.append(row_fmt("6", "Undo changes", "revert last applied plan", "undo"))
 
         lines.append(self._divider("Context & AI Helpers"))
-        lines.append(row_fmt("3", "Copy prompt", "system prompt to clipboard", "-p"))
-        lines.append(row_fmt("8", "Export context", "clean project tree for AI", "export-context"))
+        lines.append(row_fmt("b", "Context bundle", "single-file PROJECT_CONTEXT.md", "bundle"))
+        lines.append(row_fmt("8", "Export folder", "clean context/ folder tree", "export-context"))
+        lines.append(row_fmt("3", "Copy prompt", "standard system prompt", "-p"))
+        lines.append(row_fmt("9", "Compact prompt", "short prompt for small models", "-p --short"))
         lines.append(row_fmt("7", "Commit prompt", "stage diff prompt for AI", "-c"))
 
-        lines.append(self._divider("Documentation & Setup"))
-        lines.append(row_fmt("4", "Quick guide", "terminal syntax & CLI cheat-sheet", "-h"))
+        lines.append(self._divider("Documentation & Preferences"))
+        lines.append(row_fmt("4", "Quick guide", "terminal syntax & cheat-sheet", "-h"))
         lines.append(row_fmt("d", "Online docs", "open GitHub guide in browser", "docs"))
+        lines.append(row_fmt("t", "Theme toggle", f"current: {c.current_theme}", "theme <name>"))
         lines.append(row_fmt("5", "Check updates", "pull latest from GitHub", "update"))
         lines.append(self._line(f"{c.paint('q', c.SLATE, bold=True)}  {c.paint('Exit', c.SLATE)}"))
         lines.append("")
@@ -540,7 +571,7 @@ class TerminalUI:
         self.render_panel(title=self._title("Actions", "brand"), lines=lines)
         print()
         try:
-            return self.prompt_choice("Choose an option [1-8/d/q]", default="q").lower()
+            return self.prompt_choice("Choose an option [1-9/b/w/t/d/q]", default="q").lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return "q"
@@ -877,6 +908,125 @@ class TerminalUI:
             self._kv("Filesystem", c.paint("not touched / not queried", c.SLATE)),
         ])
 
+    def resolve_fuzzy_match(
+        self,
+        target: str,
+        needle: str,
+        doc_lines: list[str],
+        candidate: Any,
+    ) -> bool:
+        """
+        Interactive panel prompting the user to accept/reject a borderline fuzzy match.
+        Options: [a] Accept, [v] View Diff, [s] Skip, [q] Abort.
+        """
+        c = self.palette
+        s_line = candidate.start_line
+        e_line = candidate.end_line
+        pct = int(candidate.similarity * 100)
+        cand_lines = doc_lines[s_line : e_line + 1]
+
+        needle_lines = needle.strip().split("\n")
+        needle_preview = [f"- {ln}" for ln in needle_lines[:3]]
+        if len(needle_lines) > 3:
+            needle_preview.append(f"  ... (+{len(needle_lines) - 3} more lines)")
+
+        cand_preview = [f"+ {ln}" for ln in cand_lines[:3]]
+        if len(cand_lines) > 3:
+            cand_preview.append(f"  ... (+{len(cand_lines) - 3} more lines)")
+
+        lines = [
+            self._line(f"Borderline match ({pct}% similarity) at lines {s_line + 1}-{e_line + 1}", c.AMBER, bold=True),
+            self._line(""),
+            self._line("Expected (SEARCH block):", c.SLATE),
+        ]
+        for np in needle_preview:
+            lines.append(self._line(f"  {np}", c.RED))
+        lines.append(self._line(""))
+        lines.append(self._line("Actual in file:", c.SLATE))
+        for cp in cand_preview:
+            lines.append(self._line(f"  {cp}", c.GREEN))
+
+        lines.append(self._divider())
+        lines.append(self._line("  [a] Accept match    [v] View full diff    [s] Skip    [q] Abort", c.WHITE))
+
+        self._card(f"🛡️ Fuzzy Match Resolver · {target}", "warn", lines)
+
+        while True:
+            choice = self.prompt_choice("Resolve match? [a/v/s/q]", default="a").lower()
+            if choice in {"v", "view", "diff"}:
+                import difflib
+                diff = list(
+                    difflib.unified_diff(
+                        needle_lines,
+                        cand_lines,
+                        fromfile="Expected (SEARCH)",
+                        tofile=f"{target} (lines {s_line + 1}-{e_line + 1})",
+                        lineterm="",
+                    )
+                )
+                self.show_diff("\n".join(diff))
+                continue
+            if choice in {"a", "accept", "y", "yes"}:
+                return True
+            if choice in {"s", "skip", "n", "no"}:
+                return False
+            if choice in {"q", "quit", "abort", "exit"}:
+                raise KeyboardInterrupt()
+            return False
+
+    def resolve_fuzzy_ambiguity(
+        self,
+        target: str,
+        candidates: list[Any],
+    ) -> Any | None:
+        """
+        Interactive selection panel when multiple close fuzzy candidates are detected.
+        """
+        c = self.palette
+        lines = [
+            self._line(f"Multiple candidates detected for SEARCH block in {target}:", c.AMBER, bold=True),
+            self._line(""),
+        ]
+        for idx, cand in enumerate(candidates[:5], 1):
+            pct = int(cand.similarity * 100)
+            lines.append(self._line(f"  [{idx}] Lines {cand.start_line + 1}-{cand.end_line + 1} ({pct}% similarity)", c.CYAN, bold=True))
+            if cand.preview:
+                lines.append(self._line(f"      {cand.preview}", c.SLATE))
+
+        lines.append(self._divider())
+        lines.append(self._line(f"  Select candidate [1-{min(len(candidates), 5)}] or [q] to Abort", c.WHITE))
+
+        self._card(f"🛡️ Disambiguate Matches · {target}", "warn", lines)
+
+        while True:
+            choice = self.prompt_choice(f"Select candidate [1-{min(len(candidates), 5)}/q]", default="1").lower()
+            if choice.isdigit():
+                num = int(choice)
+                if 1 <= num <= min(len(candidates), 5):
+                    return candidates[num - 1]
+            if choice in {"q", "quit", "abort", "exit"}:
+                return None
+            return candidates[0]
+
+    def fuzzy_audit_summary(self, audit_entries: list[tuple[str, tuple[int, int] | None, float]]) -> None:
+        """
+        Renders a summary card showing all fuzzy matches accepted during execution.
+        """
+        if not audit_entries:
+            return
+        c = self.palette
+        lines = [
+            self._line("The following edits were applied using fuzzy matching:", c.WHITE),
+            self._line(""),
+        ]
+        for target, line_range, sim in audit_entries:
+            pct = int(sim * 100)
+            rng_str = f"lines {line_range[0] + 1}-{line_range[1] + 1}" if line_range else "span"
+            lines.append(self._line(f"  • {c.paint(target, c.WHITE, bold=True)}: {rng_str} ({c.paint(f'{pct}% similarity', c.AMBER)})"))
+        lines.append(self._line(""))
+        lines.append(self._tip("Verify these modified regions with 'git diff' to ensure intent was preserved."))
+        self._card("🛡️ Fuzzy Match Audit", "warn", lines)
+
     # ------------------------------------------------------------------ #
     # Clipboard / commit flow
     # ------------------------------------------------------------------ #
@@ -952,7 +1102,18 @@ class TerminalUI:
         c = self.palette
         self._card("Commit skipped", "warn", [self._line(error, c.AMBER)])
 
-    def plan_export_success(self, location: str, included: int, ignored: int, ignore_file: str, tokens: int = 0, size_kb: float = 0.0, compact: bool = False) -> None:
+    def plan_export_success(
+        self,
+        location: str,
+        included: int,
+        ignored: int,
+        ignore_file: str,
+        tokens: int = 0,
+        size_kb: float = 0.0,
+        compact: bool = False,
+        copied_to_clipboard: bool = False,
+        file_path: Path | None = None,
+    ) -> None:
         c = self.palette
         token_str = f"~{tokens:,} tokens ({size_kb} KB)"
         mode_str = "compact skeleton (token saver)" if compact else "full context"
@@ -964,6 +1125,12 @@ class TerminalUI:
             f"  {c.paint('Files ignored:', c.SLATE):<18} {c.paint(str(ignored), c.SLATE)}",
             f"  {c.paint('Ignore file:', c.SLATE):<18} {c.paint(ignore_file, c.WHITE)}",
         ]
+        if file_path:
+            lines.append(self._tip("Context is large! File copied to clipboard: paste (Cmd+V/Ctrl+V) directly into chat to attach."))
+            lines.append(self._kv("File", c.paint(str(file_path), c.CYAN, bold=True)))
+        elif copied_to_clipboard:
+            lines.append("")
+            lines.append(self._tip("Bundle content copied to clipboard! Paste (Cmd+V/Ctrl+V) directly into AI chat."))
         self._card("Clean Context Exported", "ok", lines)
 
     def fetch_success(self, file_count: int, total_lines: int, tokens: int = 0) -> None:
@@ -980,6 +1147,35 @@ class TerminalUI:
         if is_large:
             lines.append(self._kv("File", c.paint("context/FETCHED_CONTEXT.md", c.CYAN, bold=True)))
         self._card("Context Fetched", "ok", lines)
+
+    def watch_started(self, root: Path) -> None:
+        c = self.palette
+        lines = [
+            self._line("Monitoring system clipboard for ```code_exec``` plans...", c.WHITE, bold=True),
+            self._kv("Directory", c.paint(str(root), c.CYAN)),
+            self._kv("Trigger", c.paint("Copy an AI reply to preview & apply immediately", c.AMBER)),
+            self._tip("Press Ctrl+C or enter 'q' at any prompt to exit watch mode."),
+        ]
+        self._card("Clipboard Watch Active", "info", lines)
+
+    def watch_plan_detected(self, op_count: int, file_count: int) -> None:
+        c = self.palette
+        op_noun = "operation" if op_count == 1 else "operations"
+        file_noun = "file" if file_count == 1 else "files"
+        lines = [
+            self._line("New execution plan detected on clipboard!", c.GREEN, bold=True),
+            self._kv("Plan details", c.paint(f"{op_count} {op_noun} across {file_count} {file_noun}", c.CYAN, bold=True)),
+        ]
+        self._card("AI Plan Detected", "brand", lines)
+
+    def completions_installed(self, shell: str, path: str) -> None:
+        c = self.palette
+        lines = [
+            self._line(f"Autocompletions successfully configured for {shell}.", c.GREEN, bold=True),
+            self._kv("Location", c.paint(path, c.CYAN)),
+            self._tip(f"Restart your shell or run: source ~/.{shell}rc"),
+        ]
+        self._card("Shell Completions Installed", "ok", lines)
 
     # ------------------------------------------------------------------ #
     # Warnings, errors & recovery
