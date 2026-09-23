@@ -194,6 +194,7 @@ def interactive_fuzzy_resolver(target: str, needle: str, candidates: list[FuzzyC
     """Resolver callback connected to code_exec_matcher.FUZZY_RESOLVER."""
     if not candidates:
         return None
+    ui.stop_searching()
     if len(candidates) > 1:
         chosen = ui.resolve_fuzzy_ambiguity(target, candidates)
         if chosen is None:
@@ -286,7 +287,8 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
             new = doc[: match.start] + replacement + doc[match.end :]
             if match.fuzzy:
                 validate_fuzzy_replacement_safety(args[0], doc, new, match)
-                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
+                if not isinstance(fs, VirtualFS):
+                    AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
             done = "Edited"
 
@@ -317,7 +319,8 @@ def execute(op: Operation, fs, _match_cache: dict | None = None) -> str | None:
                 done = "Inserted after marker in"
             if match.fuzzy:
                 validate_fuzzy_replacement_safety(args[0], doc, new, match)
-                AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
+                if not isinstance(fs, VirtualFS):
+                    AUDIT_FUZZY_RESOLUTIONS.append((args[0], match.line_range, getattr(match, "similarity", 1.0)))
             note = match.note
 
         elif command == "APPEND":
@@ -505,7 +508,7 @@ def check_paths(op: Operation) -> None:
         safe_path(value, follow_leaf=(op.command != "FETCH"))
 
 
-def generate_plan_diff(operations: list[Operation]) -> str:
+def generate_plan_diff(operations: list[Operation], _match_cache: dict | None = None) -> str:
     """Generates unified diff text for all planned file modifications."""
     vfs = VirtualFS()
     diff_lines = []
@@ -523,7 +526,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
             )
             diff_lines.extend(diff)
             try:
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
             except Exception:
                 pass
         elif cmd in {"EDIT", "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "REPLACE_ALL", "PATCH"}:
@@ -535,7 +538,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                     old_text = vfs.read(target_path)
                 elif target_path.is_file():
                     old_text = read_text(target_path)
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
                 new_text = vfs.read(target_path)
                 diff = difflib.unified_diff(
                     old_text.splitlines(keepends=True),
@@ -548,7 +551,7 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                 pass
         elif cmd in {"TOUCH", "CHMOD", "MKDIR"}:
             try:
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
             except Exception:
                 pass
         elif cmd == "DELETE":
@@ -565,19 +568,19 @@ def generate_plan_diff(operations: list[Operation]) -> str:
                     tofile="/dev/null",
                 )
                 diff_lines.extend(diff)
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
             except Exception:
                 pass
         elif cmd in {"MOVE", "RENAME"}:
             diff_lines.append(f"--- a/{op.args[0]}\n+++ b/{op.args[1]}\n@@ move/rename @@\n")
             try:
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
             except Exception:
                 pass
         elif cmd == "COPY":
             diff_lines.append(f"--- /dev/null\n+++ b/{op.args[1]}\n@@ copy from {op.args[0]} @@\n")
             try:
-                execute(op, vfs)
+                execute(op, vfs, _match_cache=_match_cache)
             except Exception:
                 pass
     return "".join(diff_lines)
@@ -1743,7 +1746,7 @@ def main(argv=None) -> int:
     if args.tree or should_show_folder_tree(operations):
         ui.show_tree(operations)
 
-    diff_text = generate_plan_diff(operations)
+    diff_text = generate_plan_diff(operations, _match_cache=match_cache)
     if args.diff:
         ui.show_diff(diff_text)
 

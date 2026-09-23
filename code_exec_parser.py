@@ -288,6 +288,88 @@ def _dedent_plan(text: str) -> str:
     return text
 
 
+_TEX_EXTENSIONS = {".tex", ".latex", ".sty", ".cls", ".dtx", ".ins", ".bib"}
+_HTML_EXTENSIONS = {".html", ".htm", ".xml", ".svg", ".xhtml"}
+
+
+def _sanitize_universal_glitches(text: str) -> tuple[str, int]:
+    """
+    Sanitize unambiguous LaTeX and HTML entity glitches that should never appear in code/plans:
+    - `\\vert{}\\vert{}`, `\\vert\\vert`, `\\Vert`, `&#124;&#124;` -> `||`
+    - `\\vert{}`, `&#124;`, `&vert;` -> `|`
+    - `&amp;&amp;`, `\\&\\&`, `\\& \\&` -> `&&`
+    - `&lt;=`, `&gt;=`, `&ne;`, `&#8800;` -> `<=`, `>=`, `!=`
+    - `\\textasciitilde{}`, `\\textasciicircum{}` -> `~`, `^`
+    """
+    count = 0
+    patterns = [
+        # Double pipes (logical OR / bitwise OR)
+        (r"\\vert\{\}\s*\\vert\{\}", "||"),
+        (r"\\vert\s*\\vert(?![A-Za-z])", "||"),
+        (r"\\Vert(?:\{\})?(?![A-Za-z])", "||"),
+        (r"&#124;\s*&#124;|&vert;\s*&vert;", "||"),
+        # Single pipes
+        (r"\\vert\{\}", "|"),
+        (r"&#124;|&vert;", "|"),
+        # Double ampersand (logical AND)
+        (r"&amp;\s*&amp;", "&&"),
+        (r"\\&\s*\\&", "&&"),
+        # Comparisons & relations
+        (r"&lt;=", "<="),
+        (r"&gt;=", ">="),
+        (r"&ne;|&#8800;", "!="),
+        # Typography / special escapes
+        (r"\\textasciitilde(?:\{\})?", "~"),
+        (r"\\textasciicircum(?:\{\})?", "^"),
+    ]
+    cur = text
+    for pat, rep in patterns:
+        cur, n = re.subn(pat, rep, cur)
+        count += n
+    return cur, count
+
+
+def _sanitize_file_glitches(text: str, filename: str) -> tuple[str, int]:
+    """
+    Sanitize language-specific glitched escapes for non-TeX and non-HTML files.
+    """
+    ext = Path(filename).suffix.lower() if filename else ""
+    is_tex = ext in _TEX_EXTENSIONS
+    is_html = ext in _HTML_EXTENSIONS
+    count = 0
+    cur = text
+
+    if not is_tex:
+        tex_patterns = [
+            (r"\\leq(?![A-Za-z])", "<="),
+            (r"\\geq(?![A-Za-z])", ">="),
+            (r"\\neq(?![A-Za-z])", "!="),
+            (r"\\vert(?![A-Za-z])", "|"),
+            (r"(?<!\\)\\&", "&"),
+            (r"(?<!\\)\\%", "%"),
+            (r"\\sim(?![A-Za-z])", "~"),
+        ]
+        for pat, rep in tex_patterns:
+            cur, n = re.subn(pat, rep, cur)
+            count += n
+
+    if not is_html:
+        html_patterns = [
+            (r"&amp;", "&"),
+            (r"&quot;", '"'),
+            (r"&#39;|&apos;", "'"),
+            (r"&lt;&lt;", "<<"),
+            (r"&gt;&gt;", ">>"),
+            (r"&lt;", "<"),
+            (r"&gt;", ">"),
+        ]
+        for pat, rep in html_patterns:
+            cur, n = re.subn(pat, rep, cur)
+            count += n
+
+    return cur, count
+
+
 def _normalize(text: str) -> str:
     text = (
         text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ").translate(_ZERO_WIDTH)
@@ -295,6 +377,10 @@ def _normalize(text: str) -> str:
     text, removed = _THINK_TAG.subn("", text)
     if removed:
         _warn(f"ignored {removed} <thinking> block(s)")
+
+    text, n_glitches = _sanitize_universal_glitches(text)
+    if n_glitches:
+        _warn(f"restored {n_glitches} LaTeX / entity glitch(es) (e.g. \\vert{{}}\\vert{{}} -> ||, \\&\\& -> &&)")
 
     fixed = 0
     lines = []
@@ -448,9 +534,13 @@ def extract_plan(text: str) -> str:
 
     def keep_unclosed(block: str, what: str) -> None:
         # Forgot the closing fence, but every operation is complete: accept it.
+        cleaned_block = block.rstrip("`~ \t\n")
         if _parses_cleanly(block):
             _warn(f"closing marker missing for {what}; plan is complete, applying it")
             plans.append(block)
+        elif _parses_cleanly(cleaned_block):
+            _warn(f"closing marker missing for {what}; plan is complete, applying it")
+            plans.append(cleaned_block)
         else:
             unclosed.append(f"unclosed {what}")
 
@@ -465,9 +555,13 @@ def extract_plan(text: str) -> str:
             block_lines = []
             found_end = False
             while i < len(lines):
-                if lines[i].strip().upper().replace(" ", "_") == "END_CODE_EXEC_PLAN":
+                curr_stripped = lines[i].strip().upper().replace(" ", "_")
+                if curr_stripped == "END_CODE_EXEC_PLAN":
                     found_end = True
                     i += 1
+                    break
+                if curr_stripped == "CODE_EXEC_PLAN" and _parses_cleanly("\n".join(block_lines)):
+                    found_end = True
                     break
                 block_lines.append(lines[i])
                 i += 1
@@ -503,20 +597,25 @@ def extract_plan(text: str) -> str:
                             content_depth -= 1
 
                 if content_depth == 0:
-                    close_match = re.match(r"^[ \t]*(`{3,}|~{3,})[ \t]*$", curr)
+                    close_match = re.match(r"^[ \t]*(`{3,}|~{3,})([a-zA-Z0-9_-]*)[ \t]*$", curr)
                     if close_match:
                         c_chars = close_match.group(1)
-                        if c_chars[0] == fence_char and len(c_chars) >= fence_len:
-                            # For a code_exec block, only honor this as the real closer if
-                            # the plan collected so far is actually complete. A CREATE/EDIT
-                            # may be writing a file (e.g. a README) that itself contains a
-                            # nested ```/~~~ example; without this check that inner fence
-                            # would close the outer block early and silently truncate
-                            # everything after it.
-                            if not is_code_exec or _parses_cleanly("\n".join(block_lines)):
-                                found_end = True
-                                i += 1
-                                break
+                        c_tag = close_match.group(2).strip()
+                        c_len = len(c_chars)
+                        if c_chars[0] == fence_char:
+                            # 1. New code_exec block starting immediately without preceding closer:
+                            if is_code_exec and _is_code_exec_fence(c_tag):
+                                if _parses_cleanly("\n".join(block_lines)) and _has_later_command(lines, i + 1):
+                                    found_end = True
+                                    # Do not advance i; outer loop will process this new fence
+                                    break
+
+                            # 2. Closer: matching fence length, or relaxed fence length (e.g. 4-backtick open, 3-backtick close)
+                            if c_len >= fence_len or c_len >= 3:
+                                if not is_code_exec or _parses_cleanly("\n".join(block_lines)):
+                                    found_end = True
+                                    i += 1
+                                    break
 
                 if is_code_exec:
                     block_lines.append(curr)
@@ -533,9 +632,14 @@ def extract_plan(text: str) -> str:
         i += 1
 
     if unclosed:
-        if len(plans) == 0:
-            raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
-        raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans) + len(unclosed)}")
+        if not MERGE_MULTIPLE_PLANS:
+            if len(plans) == 0:
+                raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
+            raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans) + len(unclosed)}")
+        else:
+            if len(plans) == 0:
+                raise OpError(f"ERR|PLAN_NOT_FOUND|{unclosed[0]}")
+            _warn(f"{len(unclosed)} incomplete block(s) skipped; merged {len(plans)} complete plan block(s)")
 
     if len(plans) == 1:
         return plans[0]
@@ -543,7 +647,7 @@ def extract_plan(text: str) -> str:
     if len(plans) > 1:
         if MERGE_MULTIPLE_PLANS:
             _warn(f"{len(plans)} plan blocks found; merged in order (prefer a single block)")
-            return "\n".join(plans)
+            return "\n\n".join(p.strip() for p in plans if p.strip())
         raise OpError(f"ERR|MULTIPLE_PLANS|{len(plans)}")
 
     # Format 3: unfenced plan (optionally wrapped in a plain fence, optionally after some prose)
@@ -830,6 +934,25 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
     return Operation(command, (path,), first, second), i
 
 
+def _sanitize_operation(op: Operation, lineno: int, warn: Callable[[str], None]) -> Operation:
+    if op.command in {"RUN", "COMMIT"}:
+        cmd_text = op.args[0]
+        cleaned, n = _sanitize_file_glitches(cmd_text, "command.sh")
+        if n:
+            warn(f"line {lineno}: sanitized {n} escaped symbol(s) in {op.command} argument")
+            return Operation(op.command, (cleaned,), source_line=op.source_line)
+        return op
+
+    if op.args:
+        path = op.args[0]
+        cleaned_data, n1 = _sanitize_file_glitches(op.data, path) if op.data else (op.data, 0)
+        cleaned_extra, n2 = _sanitize_file_glitches(op.extra, path) if op.extra else (op.extra, 0)
+        if n1 or n2:
+            warn(f"line {lineno}: sanitized {n1 + n2} escaped symbol(s) in {op.command} {path}")
+            return Operation(op.command, op.args, cleaned_data, cleaned_extra, source_line=op.source_line)
+    return op
+
+
 def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
     lines = text.split("\n")
     operations: list[Operation] = []
@@ -866,7 +989,12 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
             if _DIFF_OPEN.match(line) or re.match(rf"^{kw}\s*:?\s*(<{{1,5}})?\s*$", line, re.IGNORECASE):
                 try:
                     first, second, i = _read_pair(lines, i, last_cmd)
-                    operations.append(Operation(last_cmd, operations[-1].args, first, second))
+                    op_bare = _sanitize_operation(
+                        Operation(last_cmd, operations[-1].args, first, second, source_line=lineno),
+                        lineno,
+                        warn,
+                    )
+                    operations.append(op_bare)
                     continue
                 except ValueError as exc:
                     raise ValueError(f"line {lineno}: {exc}") from None
@@ -882,6 +1010,7 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
         except ValueError as exc:
             raise ValueError(f"line {lineno}: {exc}") from None
         operation.source_line = lineno
+        operation = _sanitize_operation(operation, lineno, warn)
         operations.append(operation)
 
         # Several SEARCH/REPLACE (or MARKER/CONTENT) pairs under one command become
@@ -897,6 +1026,7 @@ def _parse_text(text: str, warn: Callable[[str], None]) -> list[Operation]:
                     break
                 first, second, i = nxt
                 child = Operation(operation.command, operation.args, first, second, source_line=lineno)
+                child = _sanitize_operation(child, lineno, warn)
                 operations.append(child)
                 extra += 1
             if extra:

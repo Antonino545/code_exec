@@ -107,7 +107,10 @@ def watch_clipboard(
             continue
 
         ui.show_plan(operations, reason, deferred)
-        diff_text = generate_diff_fn(operations)
+        try:
+            diff_text = generate_diff_fn(operations, _match_cache=match_cache)
+        except TypeError:
+            diff_text = generate_diff_fn(operations)
 
         if getattr(args, "diff", False):
             ui.show_diff(diff_text)

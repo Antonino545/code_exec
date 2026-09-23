@@ -117,6 +117,10 @@ def _normalize_code_line_for_fuzzy(line: str) -> str:
     s = re.sub(r",\s*([\]\}\)])", r"\1", s)
     s = re.sub(r",\s*$", "", s)
     s = re.sub(r";\s*$", "", s)
+    s = re.sub(r"\\vert\{\}\s*\\vert\{\}", "||", s)
+    s = re.sub(r"\\vert\{\}", "|", s)
+    s = re.sub(r"&amp;\s*&amp;", "&&", s)
+    s = re.sub(r"\\&\s*\\&", "&&", s)
     s = _strip_symbols_and_emojis(s)
     return s.strip()
 
@@ -376,6 +380,10 @@ def _match_js_tokens(doc: str, needle: str) -> list[tuple[int, int, int, int]]:
         s = re.sub(r"/\*.*?\*/", "", s)
         s = s.replace('"', "'").replace("`", "'")
         s = re.sub(r",\s*([}\]])", r"\1", s)
+        s = re.sub(r"\\vert\{\}\s*\\vert\{\}", "||", s)
+        s = re.sub(r"\\vert\{\}", "|", s)
+        s = re.sub(r"&amp;\s*&amp;", "&&", s)
+        s = re.sub(r"\\&\s*\\&", "&&", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s
 
@@ -763,6 +771,7 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
         if competing:
             _verbose_note(f"Tier 7 (fuzzy ambiguity): {len(candidates)} candidates found in {target}")
             if FUZZY_RESOLVER is not None:
+                ui.stop_searching()
                 resolved = FUZZY_RESOLVER(target, needle, candidates)
                 if resolved is not None:
                     return resolved
@@ -783,6 +792,7 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
             # Resolver Zone (RESOLVER_THRESHOLD <= similarity < CONFIDENT_THRESHOLD)
             _verbose_note(f"Tier 7 (fuzzy borderline {pct}%): candidate found at lines {best.start_line + 1}-{best.end_line + 1}")
             if FUZZY_RESOLVER is not None:
+                ui.stop_searching()
                 resolved = FUZZY_RESOLVER(target, needle, [best])
                 if resolved is not None:
                     return resolved

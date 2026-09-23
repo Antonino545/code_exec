@@ -15,7 +15,9 @@ import code_exec_matcher as matcher
 from code_exec import (
     AUDIT_FUZZY_RESOLUTIONS,
     execute,
+    generate_plan_diff,
     interactive_fuzzy_resolver,
+    preflight,
     validate_fuzzy_replacement_safety,
 )
 from code_exec_fs import RealFS
@@ -402,6 +404,104 @@ class TestFuzzyResolverIntelligenceAndSafety(unittest.TestCase):
         self.assertGreaterEqual(logged_sim, 0.90)
         fs.cleanup()
 
+    # =========================================================================
+    # 4. Interactive Resolver TUI & Search Indicator Concurrency
+    # =========================================================================
+
+    def test_searching_indicator_lifecycle_and_stop_searching(self):
+        """Verifies that ui.stop_searching cleanly terminates the background animation."""
+        with ui.searching("heavy_scan.jsx"):
+            self.assertIsNotNone(ui._active_search)
+            # Call stop_searching while inside the context
+            ui.stop_searching()
+            self.assertIsNone(ui._active_search)
+        # Context manager exit should be clean and not raise
+        self.assertIsNone(ui._active_search)
+
+    def test_resolve_fuzzy_match_accepts_a_and_bare_enter(self):
+        """Entering 'a', 'A', '  a  ', or bare Enter (default) accepts the fuzzy match."""
+        cand = FuzzyCandidate(0.85, 0, 10, 0, 1, "test")
+        doc_lines = ["line 1", "line 2"]
+
+        # 1. Test explicit 'a'
+        with patch.object(ui, "prompt_choice", return_value="a"):
+            self.assertTrue(ui.resolve_fuzzy_match("test.js", "needle", doc_lines, cand))
+
+        # 2. Test whitespace-padded '  a  '
+        with patch.object(ui, "prompt_choice", return_value="  a  "):
+            self.assertTrue(ui.resolve_fuzzy_match("test.js", "needle", doc_lines, cand))
+
+        # 3. Test empty input (bare Enter, defaults to 'a')
+        with patch.object(ui, "prompt_choice", return_value=""):
+            self.assertTrue(ui.resolve_fuzzy_match("test.js", "needle", doc_lines, cand))
+
+        # 4. Test explicit 's' (skip)
+        with patch.object(ui, "prompt_choice", return_value="s"):
+            self.assertFalse(ui.resolve_fuzzy_match("test.js", "needle", doc_lines, cand))
+
+    def test_resolve_fuzzy_match_reprompts_on_invalid_input(self):
+        """Typing invalid choices re-prompts the user instead of rejecting or crashing."""
+        cand = FuzzyCandidate(0.85, 0, 10, 0, 1, "test")
+        doc_lines = ["line 1", "line 2"]
+
+        # Returns invalid first, then accepts with 'a'
+        inputs = iter(["invalid_input", "x", "a"])
+        with patch.object(ui, "prompt_choice", side_effect=lambda *args, **kwargs: next(inputs)):
+            self.assertTrue(ui.resolve_fuzzy_match("test.js", "needle", doc_lines, cand))
+
+    def test_find_unique_stops_searching_before_invoking_fuzzy_resolver(self):
+        """find_unique stops the searching animation BEFORE calling the interactive resolver."""
+        doc = "def foo():\n    return 1\n"
+        needle = "def foo():\n    return 2"  # Borderline match
+        stopped_during_resolver = []
+
+        def mock_resolver(target, needle_str, candidates):
+            # Check if active search was stopped
+            stopped_during_resolver.append(ui._active_search is None)
+            cand = candidates[0]
+            return MatchResult(cand.start, cand.end, "resolved", True, (cand.start_line, cand.end_line), cand.similarity)
+
+        matcher.FUZZY_RESOLVER = mock_resolver
+        find_unique(doc, needle, "SEARCH", "app.py")
+        self.assertEqual(stopped_during_resolver, [True])
+
+    def test_generate_plan_diff_reuses_match_cache_without_rescanning(self):
+        """generate_plan_diff uses _match_cache so it never triggers a second search or resolver prompt."""
+        test_file = self.scratch / "diff_cache_test.py"
+        test_file.write_text("def greet():\n    print('hello world')\n", encoding="utf-8")
+
+        op = Operation(
+            "EDIT",
+            (f"{self.scratch_rel}/diff_cache_test.py",),
+            data="def greet():\n    print(\"hello world\")",  # quote drift (borderline/confident)
+            extra="def greet():\n    print('hello universe')\n",
+        )
+
+        resolver_calls = []
+
+        def tracking_resolver(target, needle, candidates):
+            resolver_calls.append(target)
+            cand = candidates[0]
+            return MatchResult(cand.start, cand.end, "resolved", True, (cand.start_line, cand.end_line), cand.similarity)
+
+        matcher.FUZZY_RESOLVER = tracking_resolver
+        matcher.FUZZY_POLICY = "prompt"
+
+        # 1. Run preflight: populates match_cache
+        _, _, match_cache = preflight([op])
+        self.assertIn(id(op), match_cache)
+
+        # Count resolver calls during preflight
+        preflight_calls = len(resolver_calls)
+
+        # 2. Run generate_plan_diff WITH match_cache: should reuse match_cache and NOT invoke resolver again
+        diff_text = generate_plan_diff([op], _match_cache=match_cache)
+        self.assertIn("-    print('hello world')", diff_text)
+        self.assertIn("+    print('hello universe')", diff_text)
+        self.assertEqual(len(resolver_calls), preflight_calls, "generate_plan_diff must not re-invoke matcher/resolver")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
