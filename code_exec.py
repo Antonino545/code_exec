@@ -749,7 +749,7 @@ def _get_error_guidance(error_msg: str) -> str:
             "- **FORBIDDEN_COMMAND**: The RUN command uses a forbidden or destructive pattern.\n"
             "  ✅ **Do**: Use standard safe runners: `pytest`, `python3 -m unittest`, "
             "`npm test`, `cargo test`, `ruff`, `black`.\n"
-            "  ❌ **Do NOT**: Use `rm -rf`, `sudo`, `curl | sh`, `wget`, or inline execution flags."
+            "  ❌ **Do NOT**: Use `rm -rf`, `sudo`, `curl | sh`, or `wget`."
         )
     if "ERR|UNKNOWN_COMMAND" in error_msg:
         hints.append(
@@ -1355,6 +1355,8 @@ def main(argv=None) -> int:
                              "or project type (package.json → npm test, etc.)")
     parser.add_argument("--fuzzy", choices=["prompt", "strict", "auto"], default=None,
                         help="Fuzzy matching resolution policy: prompt (interactive), strict (fail if <90%%), auto (accept >=72%%)")
+    parser.add_argument("--no-notify", dest="notify", action="store_false", default=True,
+                        help="Disable desktop/system notifications in watch mode")
     args = parser.parse_args(argv)
 
     if args.version:
@@ -1572,7 +1574,7 @@ def main(argv=None) -> int:
             generate_diff_fn=generate_plan_diff,
         )
 
-    if args.export_plan:
+    if args.export_plan or getattr(args, "bundle", False):
         from code_exec_plan_export import create_plan_folder, create_plan_bundle
         try:
             copied_clip = False
@@ -1594,7 +1596,7 @@ def main(argv=None) -> int:
                         MAX_CLIPBOARD_TOKENS = 18000
                         MAX_CLIPBOARD_BYTES = 75 * 1024
                         file_bytes = bundle_path.stat().st_size
-                        # If file is too large (like commit diff / fetched context), place file in clipboard
+                        # If file is large (>75KB or >18k tokens), place file object in clipboard so Cmd+V in Gemini/Claude attaches file
                         if tokens > MAX_CLIPBOARD_TOKENS or file_bytes > MAX_CLIPBOARD_BYTES:
                             copied_file = set_clipboard_file(bundle_path)
                             if copied_file:
@@ -1604,8 +1606,6 @@ def main(argv=None) -> int:
                                 set_clipboard(bundle_path.read_text(encoding="utf-8"))
                                 copied_clip = True
                         else:
-                            # Small file: place both file object and full text
-                            set_clipboard_file(bundle_path)
                             set_clipboard(bundle_path.read_text(encoding="utf-8"))
                             copied_clip = True
                 except Exception:

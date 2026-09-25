@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -138,6 +139,136 @@ class _TreeNode:
         self.action = ""
         self.extra = ""
         self.children: dict[str, _TreeNode] = {}
+
+
+def play_system_sound(sound_name: str | None = None, is_error: bool = False) -> bool:
+    """
+    Plays a crisp system sound directly via audio hardware (bypassing Notification Center).
+    On macOS: uses afplay with /System/Library/Sounds (e.g. Hero, Ping, Sosumi).
+    On Linux: uses paplay with /usr/share/sounds.
+    """
+    chosen = sound_name or ("Sosumi" if is_error else "Hero")
+    try:
+        if sys.platform == "darwin":
+            for ext in (".aiff", ".caf"):
+                path = Path(f"/System/Library/Sounds/{chosen}{ext}")
+                if path.exists():
+                    subprocess.Popen(
+                        ["afplay", str(path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return True
+        elif sys.platform.startswith("linux"):
+            if shutil.which("paplay"):
+                for folder in ["/usr/share/sounds/freedesktop/stereo", "/usr/share/sounds"]:
+                    p = Path(folder) / f"{chosen.lower()}.oga"
+                    if p.exists():
+                        subprocess.Popen(
+                            ["paplay", str(p)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return True
+    except Exception:
+        pass
+
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+        return True
+    except Exception:
+        pass
+    return False
+
+
+def send_notification(
+    title: str,
+    message: str,
+    subtitle: str = "",
+    sound: str | None = None,
+    is_error: bool = False,
+) -> bool:
+    """
+    Sends a native system notification and plays a distinct system sound.
+    Never throws exceptions.
+    """
+    title = (title or "code-exec")[:80]
+    subtitle = (subtitle or "")[:80]
+    message = (message or "")[:200]
+    chosen_sound = sound or ("Sosumi" if is_error else "Hero")
+
+    # 1. Play sound directly via audio hardware so it is ALWAYS heard even if banners are silenced
+    play_system_sound(chosen_sound, is_error=is_error)
+
+    # 2. Display desktop notification banner
+    try:
+        if sys.platform == "darwin":
+            clean_t = title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+            clean_s = subtitle.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+            clean_m = message.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+            script = f'display notification "{clean_m}" with title "{clean_t}"'
+            if clean_s:
+                script += f' subtitle "{clean_s}"'
+            if chosen_sound:
+                script += f' sound name "{chosen_sound}"'
+
+            subprocess.run(
+                ["osascript", "-e", script],
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+
+        elif sys.platform.startswith("linux"):
+            if shutil.which("notify-send"):
+                urgency = "critical" if is_error else "normal"
+                head = f"{title}: {subtitle}" if subtitle else title
+                subprocess.run(
+                    ["notify-send", head, message, f"--urgency={urgency}", "-a", "code-exec"],
+                    timeout=3,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+
+        elif sys.platform == "win32":
+            ps_script = f'''
+$head = "{title}"
+$body = "{message}"
+try {{
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+    $template = @"
+<toast>
+    <visual>
+        <binding template="ToastText02">
+            <text id="1">$head</text>
+            <text id="2">$body</text>
+        </binding>
+    </visual>
+</toast>
+"@
+    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $xml.LoadXml($template)
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("code-exec").Show($toast)
+}} catch {{}}
+'''
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+
+    except Exception:
+        pass
+
+    return False
 
 
 class TerminalUI:
@@ -1108,12 +1239,16 @@ class TerminalUI:
             f"  {c.paint('Files ignored:', c.SLATE):<18} {c.paint(str(ignored), c.SLATE)}",
             f"  {c.paint('Ignore file:', c.SLATE):<18} {c.paint(ignore_file, c.WHITE)}",
         ]
-        if file_path:
-            lines.append(self._tip("Context is large! File copied to clipboard: paste (Cmd+V/Ctrl+V) directly into chat to attach."))
+        if copied_to_clipboard and file_path:
+            lines.append("")
+            lines.append(self._tip("Bundle file attached to clipboard! Paste (Cmd+V/Ctrl+V) directly into AI chat (Gemini/Claude)."))
             lines.append(self._kv("File", c.paint(str(file_path), c.CYAN, bold=True)))
         elif copied_to_clipboard:
             lines.append("")
             lines.append(self._tip("Bundle content copied to clipboard! Paste (Cmd+V/Ctrl+V) directly into AI chat."))
+        elif file_path:
+            lines.append(self._tip("Context is large! File created: paste (Cmd+V/Ctrl+V) or upload to chat."))
+            lines.append(self._kv("File", c.paint(str(file_path), c.CYAN, bold=True)))
         self._card("Clean Context Exported", "ok", lines)
 
     def fetch_success(self, file_count: int, total_lines: int, tokens: int = 0) -> None:
@@ -1150,6 +1285,83 @@ class TerminalUI:
             self._kv("Plan details", c.paint(f"{op_count} {op_noun} across {file_count} {file_noun}", c.CYAN, bold=True)),
         ]
         self._card("AI Plan Detected", "brand", lines)
+        play_system_sound("Pop")
+
+    def notify(
+        self,
+        title: str,
+        message: str,
+        subtitle: str = "",
+        sound: str | None = None,
+        is_error: bool = False,
+    ) -> bool:
+        return send_notification(title, message, subtitle=subtitle, sound=sound, is_error=is_error)
+
+    def watch_plan_ok(self, op_count: int, file_count: int, auto: bool = False) -> None:
+        c = self.palette
+        op_noun = "operation" if op_count == 1 else "operations"
+        file_noun = "file" if file_count == 1 else "files"
+        auto_str = " (auto-applied)" if auto else ""
+        lines = [
+            self._line(f"Plan applied successfully{auto_str}!", c.GREEN, bold=True),
+            self._kv("Result", c.paint(f"{op_count} {op_noun} across {file_count} {file_noun}", c.CYAN, bold=True)),
+            self._tip("Resuming watch... Copy another AI reply to apply."),
+        ]
+        self._card("Plan Applied · Okay", "ok", lines)
+        send_notification(
+            title="code-exec ✓ Plan Applied",
+            subtitle="Okay — Success",
+            message=f"Applied {op_count} {op_noun} across {file_count} {file_noun}.",
+            sound="Hero",
+            is_error=False,
+        )
+
+    def watch_plan_error(self, message: str) -> None:
+        c = self.palette
+        lines = [
+            self._line("Plan execution failed!", c.RED, bold=True),
+            self._kv("Error", c.paint(message, c.AMBER)),
+            self._tip("Changes rolled back. Diagnostic copied to clipboard."),
+        ]
+        self._card("Plan Failed · Not Okay", "err", lines)
+        send_notification(
+            title="code-exec ✗ Application Failed",
+            subtitle="Not Okay — Error",
+            message=message,
+            sound="Sosumi",
+            is_error=True,
+        )
+
+    def watch_validation_error(self, message: str) -> None:
+        c = self.palette
+        lines = [
+            self._line("Preflight validation failed!", c.RED, bold=True),
+            self._kv("Reason", c.paint(message, c.AMBER)),
+            self._tip("Regenerate plan from AI or check file paths."),
+        ]
+        self._card("Validation Failed · Not Okay", "err", lines)
+        send_notification(
+            title="code-exec ✗ Validation Error",
+            subtitle="Not Okay — Rejected",
+            message=f"Preflight validation failed: {message[:120]}",
+            sound="Sosumi",
+            is_error=True,
+        )
+
+    def watch_parse_error(self, message: str) -> None:
+        c = self.palette
+        lines = [
+            self._line("Detected plan in clipboard could not be parsed!", c.RED, bold=True),
+            self._kv("Syntax error", c.paint(message, c.AMBER)),
+        ]
+        self._card("Parse Error · Not Okay", "err", lines)
+        send_notification(
+            title="code-exec ✗ Parse Error",
+            subtitle="Not Okay — Syntax Error",
+            message=f"Could not parse plan: {message[:120]}",
+            sound="Sosumi",
+            is_error=True,
+        )
 
     def completions_installed(self, shell: str, path: str) -> None:
         c = self.palette
@@ -1200,7 +1412,7 @@ class TerminalUI:
         ("SEARCH_NOT_FOUND", "SEARCH block didn't match. Compare against the diff above and add unique lines."),
         ("SEARCH_AMBIGUOUS", "SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."),
         ("CONFLICTING_OPERATIONS", "The plan performs contradictory operations on the same file. Separate or order your edits."),
-        ("FORBIDDEN_COMMAND", "RUN command not permitted. Use whitelisted test runners or run manually."),
+        ("FORBIDDEN_COMMAND", "Dangerous or destructive pattern in RUN command. Remove forbidden flags/patterns."),
         ("FILE_PROTECTED", "Target is a sensitive file/key. Modify configuration files manually."),
         ("MULTIPLE_PLANS", "Multiple plan blocks found. Provide a single plan block per response."),
         ("UNKNOWN_COMMAND", "Unsupported command. Check the hint or run 'code-exec -h' for supported instructions."),

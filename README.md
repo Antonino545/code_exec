@@ -103,9 +103,9 @@ You can bypass the menu for instant automation:
 # Apply plan directly from clipboard
 code-exec apply
 
-# Clipboard Watch Mode: listen in background and prompt whenever AI reply is copied!
+# Clipboard Watch Mode: listen in background with system notifications (Success/Okay, Error/Not Okay)
 code-exec watch
-# Or short flag: code-exec -w
+# Or short flag: code-exec -w (use --no-notify to disable desktop alerts)
 
 # Install shell autocompletions for active shell (Zsh, Bash, Fish)
 code-exec --install-completions
@@ -201,7 +201,7 @@ The search and replace engine (`code_exec_matcher.py`) executes through an 8-tie
 1. **Command Whitelisting**:
    - Verification tools (`python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`, `black`, `git status`, etc.) execute cleanly.
    - Generic or unvetted scripts (`python script.py`, `node app.js`, `bash`) require explicit interactive confirmation (`[y/N]`).
-   - Destructive patterns (`rm -rf`, `sudo`, `curl | sh`, inline execution flags like `-c` or `-i`) are strictly blocked.
+   - Destructive patterns (`rm -rf`, `sudo`, `curl | sh`, `wget`) are strictly blocked.
 
 2. **Network Sandboxing**:
    - Unvetted script runs are wrapped inside OS sandboxes to drop outbound network access (`sandbox-exec -p '(version 1) (allow default) (deny network-outbound)'` on macOS, and `unshare -r -n` on Linux).

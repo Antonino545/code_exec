@@ -11,12 +11,26 @@ import time
 from pathlib import Path
 from typing import Any
 
-from code_exec_parser import extract_plan, get_clipboard, parse_operations
+import re
+from code_exec_parser import (
+    extract_plan,
+    get_clipboard,
+    get_clipboard_change_count,
+    has_plan,
+    parse_operations,
+)
 from code_exec_types import OpError
 
 
 def _clip_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+_PLAN_SIGNAL_REGEX = re.compile(
+    r"(?i)(```[ \t]*(code[_-]?exec|plan)|code_exec_plan|<<<"
+    r"|\b(edit|create|delete|patch|append|replace|update|insert|move|copy|rename|run|fetch|touch|mkdir|chmod|unlink)\b"
+    r"|---\s+a/|\+\+\+\s+b/)"
+)
 
 
 def watch_clipboard(
@@ -35,9 +49,15 @@ def watch_clipboard(
     """
     ui.watch_started(root)
 
+    last_change_count = get_clipboard_change_count()
     try:
         initial_clip = get_clipboard()
-        last_hash = _clip_hash(initial_clip) if initial_clip else ""
+        # If the clipboard already contains a plan when watch starts,
+        # do NOT lock last_hash so it immediately prompts and applies.
+        if initial_clip and has_plan(initial_clip):
+            last_hash = ""
+        else:
+            last_hash = _clip_hash(initial_clip) if initial_clip else ""
     except Exception:
         last_hash = ""
 
@@ -59,21 +79,36 @@ def watch_clipboard(
         if not current_clip:
             continue
 
+        curr_cc = get_clipboard_change_count()
+        new_copy_event = (
+            curr_cc is not None
+            and last_change_count is not None
+            and curr_cc != last_change_count
+        )
+
         curr_h = _clip_hash(current_clip)
-        if curr_h == last_hash:
+        if curr_h == last_hash and not new_copy_event:
             continue
 
-        # Content changed: update hash
+        # Content changed or newly copied
         last_hash = curr_h
+        if curr_cc is not None:
+            last_change_count = curr_cc
 
-        # Quick pre-filter: does it contain code_exec markers or common plan keywords?
-        quick_candidates = ("code_exec", "<<<", "EDIT ", "CREATE ", "DELETE ", "MOVE ", "COPY ", "RUN ", "FETCH ")
-        if not any(k in current_clip for k in quick_candidates):
+        # Quick pre-filter: does it contain code_exec markers, diffs, or plan keywords?
+        if not _PLAN_SIGNAL_REGEX.search(current_clip):
             continue
 
         try:
             plan_text = extract_plan(current_clip)
-        except OpError:
+        except OpError as exc:
+            # If the user copied something that explicitly looks like a code_exec plan block,
+            # warn them rather than silently dropping it!
+            if any(marker in current_clip.lower() for marker in ("code_exec", "code-exec", "codeexec", "code_exec_plan")):
+                err_msg = str(exc)
+                ui.warn(f"Detected plan in clipboard could not be extracted: {err_msg}")
+                if getattr(args, "notify", True) and hasattr(ui, "watch_parse_error"):
+                    ui.watch_parse_error(err_msg)
             continue
 
         if not plan_text or not plan_text.strip():
@@ -82,7 +117,10 @@ def watch_clipboard(
         try:
             operations = parse_operations(plan_text)
         except Exception as exc:
-            ui.warn(f"Detected plan in clipboard could not be parsed: {exc}")
+            err_msg = str(exc)
+            ui.warn(f"Detected plan in clipboard could not be parsed: {err_msg}")
+            if getattr(args, "notify", True) and hasattr(ui, "watch_parse_error"):
+                ui.watch_parse_error(err_msg)
             continue
 
         if not operations:
@@ -102,7 +140,10 @@ def watch_clipboard(
         try:
             reason, deferred, match_cache = preflight_fn(operations)
         except OpError as exc:
-            ui.warn(f"Plan validation failed: {exc}\n  Fix the issue or regenerate plan from AI.")
+            err_msg = str(exc)
+            ui.warn(f"Plan validation failed: {err_msg}\n  Fix the issue or regenerate plan from AI.")
+            if getattr(args, "notify", True) and hasattr(ui, "watch_validation_error"):
+                ui.watch_validation_error(err_msg)
             print(ui.palette.paint("\n  👀 Continuing to watch clipboard...\n", ui.palette.SLATE))
             continue
 
@@ -117,16 +158,28 @@ def watch_clipboard(
 
         # Auto-apply if --yes is set
         if getattr(args, "yes", False):
-            apply_plan_fn(
-                operations,
-                args.timeout,
-                no_commit=args.no_commit,
-                auto_commit=True,
-                dry_run=args.dry_run,
-                match_cache=match_cache,
-                verify_cmd=getattr(args, "verify", None),
-            )
-            print(ui.palette.paint("\n  ✓ Plan applied automatically (--yes). Resuming watch...\n", ui.palette.GREEN, bold=True))
+            try:
+                ret = apply_plan_fn(
+                    operations,
+                    args.timeout,
+                    no_commit=args.no_commit,
+                    auto_commit=True,
+                    dry_run=args.dry_run,
+                    match_cache=match_cache,
+                    verify_cmd=getattr(args, "verify", None),
+                )
+            except Exception as exc:
+                ret = 1
+                ui.warn(f"Error applying plan: {exc}")
+
+            if ret in (0, None):
+                if getattr(args, "notify", True) and hasattr(ui, "watch_plan_ok"):
+                    ui.watch_plan_ok(len(operations), unique_files, auto=True)
+                else:
+                    print(ui.palette.paint("\n  ✓ Plan applied automatically (--yes). Resuming watch...\n", ui.palette.GREEN, bold=True))
+            else:
+                if getattr(args, "notify", True) and hasattr(ui, "watch_plan_error"):
+                    ui.watch_plan_error("Plan application or verification failed. Diagnostic copied to clipboard.")
             continue
 
         # Interactive confirmation loop
@@ -141,16 +194,28 @@ def watch_clipboard(
                 return 0
 
             if choice in {"y", "yes"}:
-                apply_plan_fn(
-                    operations,
-                    args.timeout,
-                    no_commit=args.no_commit,
-                    auto_commit=False,
-                    dry_run=args.dry_run,
-                    match_cache=match_cache,
-                    verify_cmd=getattr(args, "verify", None),
-                )
-                print(ui.palette.paint("\n  ✓ Resuming watch... Copy another AI reply to apply.\n", ui.palette.SLATE))
+                try:
+                    ret = apply_plan_fn(
+                        operations,
+                        args.timeout,
+                        no_commit=args.no_commit,
+                        auto_commit=False,
+                        dry_run=args.dry_run,
+                        match_cache=match_cache,
+                        verify_cmd=getattr(args, "verify", None),
+                    )
+                except Exception as exc:
+                    ret = 1
+                    ui.warn(f"Error applying plan: {exc}")
+
+                if ret in (0, None):
+                    if getattr(args, "notify", True) and hasattr(ui, "watch_plan_ok"):
+                        ui.watch_plan_ok(len(operations), unique_files, auto=False)
+                    else:
+                        print(ui.palette.paint("\n  ✓ Resuming watch... Copy another AI reply to apply.\n", ui.palette.SLATE))
+                else:
+                    if getattr(args, "notify", True) and hasattr(ui, "watch_plan_error"):
+                        ui.watch_plan_error("Plan application failed. Changes rolled back; diagnostic on clipboard.")
                 break
             elif choice in {"n", "no", "skip"}:
                 print(ui.palette.paint("\n  Skipped plan. Resuming watch...\n", ui.palette.SLATE))

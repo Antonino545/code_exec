@@ -239,7 +239,7 @@ class TestImprovements(unittest.TestCase):
         self.assertFalse(old_bundle.exists())
 
     def test_large_bundle_copies_file_to_clipboard(self):
-        """Verify that when the context bundle exceeds the token/size threshold, the file is copied to clipboard."""
+        """Verify that when the context bundle exceeds the token/size threshold, file object is copied to clipboard."""
         for i in range(120):
             (self.test_root / f"file_{i}.txt").write_text("a very long line of code and context for testing\n" * 35, encoding="utf-8")
 
@@ -251,7 +251,7 @@ class TestImprovements(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(len(copied_files), 1)
             self.assertEqual(copied_files[0].name, "PROJECT_CONTEXT.md")
-            # Raw text shouldn't be dumped into clipboard because file copy succeeded for large payload
+            # For large files (>75KB), only file is placed on clipboard so pasting into Gemini/Claude attaches file without error
             self.assertEqual(len(copied_texts), 0)
 
     def test_completions_script_generation(self):
@@ -383,6 +383,189 @@ class TestImprovements(unittest.TestCase):
             self.assertEqual(len(applied_ops), 1)
             # prompt_choice shouldn't be called because --yes is active
             mock_ui.prompt_choice.assert_not_called()
+            mock_ui.watch_plan_ok.assert_called_once()
+
+    def test_watch_mode_notifies_error_on_failure(self):
+        """Verify watch mode triggers watch_plan_error when plan application fails."""
+        from code_exec_watch import watch_clipboard
+        from unittest.mock import MagicMock
+
+        mock_args = MagicMock()
+        mock_args.diff = False
+        mock_args.yes = True
+        mock_args.timeout = 10
+        mock_args.no_commit = False
+        mock_args.dry_run = False
+        mock_args.verify = None
+        mock_args.notify = True
+
+        sample_plan = "```code_exec\nCREATE fail_test.txt\n<<<\ncontent\n>>>\n```"
+        clips = ["Initial", sample_plan]
+
+        mock_ui = MagicMock()
+        mock_ui.palette = ui.palette
+
+        with patch("code_exec_watch.get_clipboard", side_effect=lambda: clips.pop(0) if clips else sample_plan), \
+             patch("code_exec_watch.time.sleep", return_value=None):
+            code = watch_clipboard(
+                mock_args,
+                self.test_root,
+                mock_ui,
+                preflight_fn=lambda ops: ("OK", False, {}),
+                apply_plan_fn=lambda ops, *a, **k: 1,  # returns exit code 1 (failure)
+                generate_diff_fn=lambda ops: "mock diff",
+                poll_interval=0.01,
+                max_loops=2,
+            )
+            self.assertEqual(code, 0)
+            mock_ui.watch_plan_error.assert_called_once()
+
+    def test_watch_mode_notifies_validation_error(self):
+        """Verify watch mode triggers watch_validation_error when preflight raises OpError."""
+        from code_exec_watch import watch_clipboard
+        from code_exec_types import OpError
+        from unittest.mock import MagicMock
+
+        mock_args = MagicMock()
+        mock_args.notify = True
+
+        sample_plan = "```code_exec\nCREATE bad.txt\n<<<\ncontent\n>>>\n```"
+        clips = ["Initial", sample_plan]
+
+        mock_ui = MagicMock()
+        mock_ui.palette = ui.palette
+
+        def failing_preflight(ops):
+            raise OpError("File already exists")
+
+        with patch("code_exec_watch.get_clipboard", side_effect=lambda: clips.pop(0) if clips else sample_plan), \
+             patch("code_exec_watch.time.sleep", return_value=None):
+            code = watch_clipboard(
+                mock_args,
+                self.test_root,
+                mock_ui,
+                preflight_fn=failing_preflight,
+                apply_plan_fn=lambda *a, **k: 0,
+                generate_diff_fn=lambda ops: "mock diff",
+                poll_interval=0.01,
+                max_loops=2,
+            )
+            self.assertEqual(code, 0)
+            mock_ui.watch_validation_error.assert_called_once()
+
+    def test_watch_detects_plan_already_on_clipboard_at_startup(self):
+        """Verify watch mode immediately detects a plan that was already copied before watch started."""
+        from code_exec_watch import watch_clipboard
+        from unittest.mock import MagicMock
+
+        mock_args = MagicMock()
+        mock_args.yes = True
+        mock_args.diff = False
+        mock_args.timeout = 10
+        mock_args.no_commit = False
+        mock_args.dry_run = False
+        mock_args.verify = None
+
+        sample_plan = "```code_exec\nCREATE startup_test.txt\n<<<\nstartup\n>>>\n```"
+        applied_ops = []
+        mock_ui = MagicMock()
+        mock_ui.palette = ui.palette
+
+        with patch("code_exec_watch.get_clipboard", return_value=sample_plan), \
+             patch("code_exec_watch.time.sleep", return_value=None):
+            code = watch_clipboard(
+                mock_args,
+                self.test_root,
+                mock_ui,
+                preflight_fn=lambda ops: ("OK", False, {}),
+                apply_plan_fn=lambda ops, *a, **k: applied_ops.extend(ops),
+                generate_diff_fn=lambda ops: "mock diff",
+                poll_interval=0.01,
+                max_loops=1,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(len(applied_ops), 1)
+            mock_ui.watch_plan_detected.assert_called_once()
+
+    def test_watch_detects_duplicate_copy_via_change_count(self):
+        """Verify that copying the exact same text again triggers detection if changeCount changed."""
+        from code_exec_watch import watch_clipboard
+        from unittest.mock import MagicMock
+
+        mock_args = MagicMock()
+        mock_args.yes = True
+        mock_args.diff = False
+        mock_args.timeout = 10
+        mock_args.no_commit = False
+        mock_args.dry_run = False
+        mock_args.verify = None
+
+        sample_plan = "```code_exec\nCREATE repeat.txt\n<<<\nrepeat\n>>>\n```"
+        applied_ops = []
+        mock_ui = MagicMock()
+        mock_ui.palette = ui.palette
+
+        # changeCount increments from 100 on startup to 101 on loop 1, and 102 on loop 2
+        counts = [100, 101, 102]
+
+        with patch("code_exec_watch.get_clipboard", return_value=sample_plan), \
+             patch("code_exec_watch.get_clipboard_change_count", side_effect=lambda: counts.pop(0) if counts else 102), \
+             patch("code_exec_watch.time.sleep", return_value=None):
+            code = watch_clipboard(
+                mock_args,
+                self.test_root,
+                mock_ui,
+                preflight_fn=lambda ops: ("OK", False, {}),
+                apply_plan_fn=lambda ops, *a, **k: applied_ops.extend(ops),
+                generate_diff_fn=lambda ops: "mock diff",
+                poll_interval=0.01,
+                max_loops=2,
+            )
+            self.assertEqual(code, 0)
+            # Should have triggered twice because changeCount changed each time
+            self.assertEqual(len(applied_ops), 2)
+            self.assertEqual(mock_ui.watch_plan_detected.call_count, 2)
+
+    def test_watch_warns_on_malformed_plan_block(self):
+        """Verify that when the clipboard contains a code_exec fence that fails extraction, a warning is raised."""
+        from code_exec_watch import watch_clipboard
+        from unittest.mock import MagicMock
+
+        mock_args = MagicMock()
+        mock_args.notify = True
+
+        # Unclosed code_exec block with unparsed contents
+        malformed = "```code_exec\nINVALID_SYNTAX\n"
+        clips = ["Initial clean text", malformed]
+
+        mock_ui = MagicMock()
+        mock_ui.palette = ui.palette
+
+        with patch("code_exec_watch.get_clipboard", side_effect=lambda: clips.pop(0) if clips else malformed), \
+             patch("code_exec_watch.time.sleep", return_value=None):
+            code = watch_clipboard(
+                mock_args,
+                self.test_root,
+                mock_ui,
+                preflight_fn=lambda ops: ("OK", False, {}),
+                apply_plan_fn=lambda *a, **k: 0,
+                generate_diff_fn=lambda ops: "mock diff",
+                poll_interval=0.01,
+                max_loops=2,
+            )
+            self.assertEqual(code, 0)
+            mock_ui.warn.assert_called()
+            mock_ui.watch_parse_error.assert_called_once()
+
+
+    def test_send_notification_runs_safely(self):
+        """Verify send_notification executes without raising exceptions."""
+        from code_exec_ui import send_notification
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            res = send_notification("code-exec test", "test message", subtitle="Sub", is_error=False)
+            self.assertTrue(res)
+            mock_run.assert_called_once()
 
     def test_ui_menu_option_w_launches_watch(self):
         """Verify that selecting 'w' from the interactive menu launches watch mode."""

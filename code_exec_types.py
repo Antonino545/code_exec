@@ -75,10 +75,10 @@ FORBIDDEN_RUN_SUBSTRINGS = (
     "dd if=",
     ":(){ :|:& };:",
     "> /dev/sd",
-    "curl ",
     "wget ",
     "| sh",
     "| bash",
+    "| zsh",
     "chmod 777",
     "chown -R",
 )

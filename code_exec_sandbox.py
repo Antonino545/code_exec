@@ -16,8 +16,15 @@ from code_exec_types import (
 
 
 def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict[str, str] | None]:
-    """Wraps unvetted generic commands in OS-level sandboxing (dropping network where supported)."""
+    """Wraps unvetted generic commands in OS-level sandboxing (dropping network where supported, unless command needs network)."""
     if not needs_prompt:
+        return command, None
+
+    cmd_lower = command.strip().lower()
+    is_network_cmd = cmd_lower.startswith(("curl ", "curl\t", "wget ", "git clone", "pip install"))
+    if is_network_cmd:
+        # User explicitly approved a network command in the interactive terminal prompt.
+        # Allow network traffic to proceed.
         return command, None
 
     extra_env = None
@@ -41,29 +48,27 @@ def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict
 
 
 def validate_run_command(cmd: str) -> bool:
-    """Returns True if the command requires mandatory interactive confirmation, False otherwise."""
+    """
+    Returns True if the command requires mandatory interactive confirmation, False if auto-allowed.
+    Raises OpError only for empty commands or dangerous / forbidden patterns (rm -rf, sudo, mkfs, etc.).
+    """
     trimmed = cmd.strip()
     if not trimmed:
         raise OpError("ERR|FORBIDDEN_COMMAND|empty command")
 
     cmd_lower = trimmed.lower()
 
-    # Block destructive/network substrings
+    # Block destructive/dangerous patterns
     for forbidden in FORBIDDEN_RUN_SUBSTRINGS:
         if forbidden in cmd_lower:
             raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - contains forbidden pattern '{forbidden}'")
 
-    # Block inline Python/Bash scripts and interactive REPLs
-    if re.search(r"\b(python[0-9.]*|node|bash|sh|perl|ruby)\s+(-[a-zA-Z]*c|--command|-i|-e)\b", cmd_lower):
-        raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - inline execution or interactive shell flags are forbidden")
-
     has_chaining = any(op in trimmed for op in SHELL_CHAINING_OPERATORS)
 
+    # Standard whitelisted test runners run automatically (unless chained)
     if any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES):
         return True if has_chaining else False
 
-    if any(cmd_lower.startswith(prefix) for prefix in INTERACTIVE_ONLY_PREFIXES):
-        return True
-
-    allowed_list = ", ".join(f"'{p.strip()}'" for p in ALLOWED_RUN_COMMAND_PREFIXES[:5]) + ", ..."
-    raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - command not in whitelist (allowed: {allowed_list})")
+    # Any other command (python script, build tools, npm, custom scripts)
+    # is permitted with explicit interactive user confirmation in terminal
+    return True

@@ -29,7 +29,7 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 - `FETCH path[:start-end|:symbol]`: request full file, line slice, or function/class onto clipboard (e.g. `FETCH src/app.py:my_func` or `FETCH src/models.py:User.save`)
 - `MKDIR path` · `DELETE path` (file or folder) · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs/regex allowed: `MOVE test* -> dest`, `MOVE regex:^log_.* -> logs`)
-- `RUN cmd`: only `python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`. No `-c/-i/-e`, `rm -rf`, `sudo`. Shell commands always need the `RUN` prefix.
+- `RUN cmd`: execute a test, Python script, or curl command (e.g. `RUN pytest`, `RUN python script.py`, `RUN python3 script.py`, `RUN curl https://...`). Whitelisted test runners run automatically; custom scripts, Python runs, and curl commands prompt the user interactively in the terminal for approval (`accept`). Dangerous patterns (`rm -rf`, `sudo`, `curl | sh`, `-c`) are forbidden.
 - `COMMIT type(scope): description`: last line, only after file changes.
 
 ## Block syntax: pick ONE style per block, never mix
@@ -129,6 +129,7 @@ FETCH src/utils/helpers.js:1-50
 - REPLACE only what must change; preserve indentation. Whitespace/indentation differences are tolerated; code, strings and attributes are not.
 - **Boundary anchor for large replacements (>20–30 lines)**: do not output the middle. Give only the first 4 and last 4 lines of the region as SEARCH; the engine matches the whole range.
 - Use `CREATE` for new files, `EDIT` for existing ones.
+- **When to use `RUN`**: You can emit `RUN` for tests (`pytest`, `python3 -m unittest`), running Python scripts (`RUN python script.py`), or network requests (`RUN curl ...`) when requested or needed for the task. The user will be prompted interactively in the terminal to accept or deny execution. Never emit destructive commands (`rm -rf`, `sudo`, `curl | sh`).
 
 ## Errors (a diagnostic is copied to the clipboard; fix it and resend the WHOLE plan)
 - `PLAN_NOT_FOUND`: no closed block, or output was cut off · `MULTIPLE_PLANS`: send exactly one block

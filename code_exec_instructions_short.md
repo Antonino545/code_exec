@@ -20,7 +20,7 @@ COMMAND path [<<< content >>>]
 - `FETCH path[:start-end|:symbol]` — request full file, line slice, or function/class (e.g. `FETCH src/app.py:my_func`). **Batch all needed FETCH lines in ONE block**.
 - `MKDIR path` · `DELETE path` · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs OK: `MOVE test* -> dest/`)
-- `RUN cmd` — allowed: `pytest`, `python3 -m unittest`, `npm test`, `cargo test`, `ruff`, `black`
+- `RUN cmd` — execute test/script/curl (`pytest`, `python script.py`, `curl ...`). Custom commands and curl prompt user in terminal for approval (`accept`).
 - `COMMIT type(scope): message` — last line only, after file ops
 
 ## EDIT block (pick ONE style, never mix)
@@ -58,6 +58,7 @@ Multiple edits: repeat pairs under one `EDIT path`. Same style throughout.
 - **Never use generic anchors** (`pass`, `}`, `return`, bare HTML tags) — they match everywhere.
 - **Paths are project-relative** (`src/app.py`). Never guess; never use `~/`, `/`, or `..`.
 - **Raw ASCII only (no LaTeX/HTML escapes).** NEVER use `\vert{}\vert{}`, `\&\&`, `&amp;&amp;`, `\leq`, etc. Always write literal `||`, `&&`, `|`, `&`, `<`, `>`, `<=`, `>=`, `!=`, `%`.
+- **RUN is supported for tests, Python, and curl**: Use `RUN` for tests (`pytest`), running Python scripts (`RUN python script.py`), or `curl`. Custom commands require user acceptance in the terminal.
 - No prose inside the block. No comments. No explanations.
 
 ## Errors → clipboard retry

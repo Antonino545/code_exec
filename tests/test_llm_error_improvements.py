@@ -385,6 +385,44 @@ class TestSmartPathPrefixRecovery(Base):
         self.assertTrue(len(prefix_warnings) > 0)
         self.assertEqual(result[0].args[0], "code_exec.py")
 
+    def test_project_root_prefix_stripped(self):
+        plan = "DELETE code_exec/code_exec.py"
+        with patch("code_exec_parser._warn") as mock_warn:
+            result = ops(plan)
+        warnings = [call[0][0] for call in mock_warn.call_args_list]
+        self.assertTrue(any("stripped" in w for w in warnings))
+        self.assertEqual(result[0].args[0], "code_exec.py")
+
+    def test_hyphen_underscore_typo_recovered(self):
+        plan = "DELETE code-exec-updater.py"
+        with patch("code_exec_parser._warn") as mock_warn:
+            result = ops(plan)
+        warnings = [call[0][0] for call in mock_warn.call_args_list]
+        self.assertTrue(any("adjusted" in w for w in warnings))
+        self.assertEqual(result[0].args[0], "code_exec_updater.py")
+
+    def test_omitted_directory_restored_via_suffix(self):
+        plan = "FETCH test_code_exec_parser.py"
+        with patch("code_exec_parser._warn") as mock_warn:
+            result = ops(plan)
+        warnings = [call[0][0] for call in mock_warn.call_args_list]
+        self.assertTrue(any("resolved" in w for w in warnings))
+        self.assertEqual(result[0].args[0], "tests/test_code_exec_parser.py")
+
+    def test_missing_extension_restored(self):
+        plan = "FETCH code_exec_updater"
+        with patch("code_exec_parser._warn") as mock_warn:
+            result = ops(plan)
+        warnings = [call[0][0] for call in mock_warn.call_args_list]
+        self.assertTrue(any("extension" in w for w in warnings))
+        self.assertEqual(result[0].args[0], "code_exec_updater.py")
+
+    def test_create_does_not_remap_to_existing_file(self):
+        plan = "CREATE src/code_exec.py <<<\nnew content\n>>>"
+        result = ops(plan)
+        # CREATE should preserve the requested path instead of redirecting to root code_exec.py
+        self.assertEqual(result[0].args[0], "src/code_exec.py")
+
 
 # ============================================================
 # 5. Tolerant END_OF_FILE for last block

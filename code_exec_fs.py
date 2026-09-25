@@ -346,10 +346,13 @@ class RealFS:
 
         if needs_prompt:
             c = ui.palette
-            print(c.paint("\n  ⚠️  SECURITY WARNING: Unvetted / Generic Execution Requested", c.AMBER))
-            ans = input(c.paint(f"  ❯ Allow '{command}' to execute? [y/N]: ", c.CORAL, bold=True)).strip().lower()
-            if ans not in {"y", "yes"}:
-                raise CommandFailed(f"User denied execution of: {command}")
+            print(c.paint("\n  ⚠️  SECURITY WARNING: Custom Execution Requested", c.AMBER, bold=True))
+            try:
+                ans = input(c.paint(f"  ❯ Allow '{command}' to execute? [y] Accept / [N] Deny: ", c.CORAL, bold=True)).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans not in {"y", "yes", "accept", "a", "ok"}:
+                raise CommandFailed(f"Execution denied by user for: {command}")
 
         actual_cmd, extra_env = build_sandboxed_command(command, needs_prompt)
 

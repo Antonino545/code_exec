@@ -132,11 +132,86 @@ _THINK_TAG = re.compile(r"(?ims)^[ \t]*<(think(?:ing)?)>.*?</\1>[ \t]*\n?")
 # Clipboard
 # --------------------------------------------------------------------------- #
 
+def _get_clipboard_darwin_native() -> str | None:
+    """Read clipboard directly via AppKit/NSPasteboard in-process on macOS."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        pb_cls = objc.objc_getClass(b"NSPasteboard")
+        gen_sel = objc.sel_registerName(b"generalPasteboard")
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        pb = objc.objc_msgSend(pb_cls, gen_sel)
+        if not pb:
+            return None
+
+        nsstring_cls = objc.objc_getClass(b"NSString")
+        str_sel = objc.sel_registerName(b"stringWithUTF8String:")
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+        type_str = objc.objc_msgSend(nsstring_cls, str_sel, b"public.utf8-plain-text")
+
+        sft_sel = objc.sel_registerName(b"stringForType:")
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        ns_result = objc.objc_msgSend(pb, sft_sel, type_str)
+        if not ns_result:
+            return None
+
+        utf8_sel = objc.sel_registerName(b"UTF8String")
+        objc.objc_msgSend.restype = ctypes.c_char_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        raw_bytes = objc.objc_msgSend(ns_result, utf8_sel)
+        if raw_bytes is None:
+            return ""
+        return raw_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def get_clipboard_change_count() -> int | None:
+    """Returns the NSPasteboard changeCount on macOS, or None on other platforms."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        pb_cls = objc.objc_getClass(b"NSPasteboard")
+        gen_sel = objc.sel_registerName(b"generalPasteboard")
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        pb = objc.objc_msgSend(pb_cls, gen_sel)
+        if not pb:
+            return None
+
+        cc_sel = objc.sel_registerName(b"changeCount")
+        objc.objc_msgSend.restype = ctypes.c_long
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        return int(objc.objc_msgSend(pb, cc_sel))
+    except Exception:
+        return None
+
+
 def get_clipboard() -> str:
     env = None
 
     if sys.platform == "darwin":
-        commands = [["pbpaste"]]
+        native = _get_clipboard_darwin_native()
+        if native is not None:
+            return native
+        commands = [["pbpaste", "-Prefer", "txt"], ["pbpaste"]]
         env = {**os.environ, "LANG": "en_US.UTF-8"}
     elif sys.platform.startswith("linux"):
         commands = [
@@ -394,7 +469,105 @@ def _normalize(text: str) -> str:
     return _dedent_plan("\n".join(lines))
 
 
-def _norm_path(raw: str) -> str:
+_PROJECT_FILES_CACHE: list[str] | None = None
+
+
+def clear_path_cache() -> None:
+    global _PROJECT_FILES_CACHE
+    _PROJECT_FILES_CACHE = None
+
+
+def _get_project_files(root: Path) -> list[str]:
+    global _PROJECT_FILES_CACHE
+    if _PROJECT_FILES_CACHE is not None:
+        return _PROJECT_FILES_CACHE
+
+    files_list: list[str] = []
+    ignored = {".git", ".code_exec", "__pycache__", "node_modules", ".venv", "venv", ".idea", ".vscode", "context"}
+    try:
+        for r, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in ignored and not d.startswith(".")]
+            rel_dir = Path(r).relative_to(root)
+            for f in files:
+                if not f.startswith(".") and not f.endswith((".pyc", ".pyo")):
+                    rel_file = (rel_dir / f).as_posix() if str(rel_dir) != "." else f
+                    files_list.append(rel_file)
+    except OSError:
+        pass
+    _PROJECT_FILES_CACHE = sorted(files_list)
+    return _PROJECT_FILES_CACHE
+
+
+def _resolve_hallucinated_path(p: str, root: Path, for_existing: bool = True) -> tuple[str | None, str]:
+    if not for_existing:
+        return None, ""
+
+    if (root / p).exists():
+        return p, ""
+
+    parts = p.split("/")
+    filename = parts[-1]
+
+    # 1. Progressive prefix stripping
+    # Handles: `src/foo.py` -> `foo.py`, `code_exec/foo.py` -> `foo.py`, `src/app/bar.py` -> `app/bar.py`
+    for i in range(1, len(parts)):
+        sub = "/".join(parts[i:])
+        if (root / sub).exists():
+            prefix = "/".join(parts[:i])
+            return sub, f"path prefix '{prefix}/' stripped (file found at '{sub}')"
+
+    # 2. Case and hyphen/underscore variations in same relative directory
+    cand_variants = [
+        p.replace("-", "_"),
+        p.replace("_", "-"),
+    ]
+    for cand in cand_variants:
+        if cand != p and (root / cand).exists():
+            return cand, f"path separator adjusted (file found at '{cand}')"
+
+    # Case-insensitive match in parent directory
+    parent = root / Path(p).parent
+    if parent.is_dir():
+        target_lower = filename.lower()
+        try:
+            for item in parent.iterdir():
+                if item.is_file() and item.name.lower() == target_lower:
+                    rel = item.relative_to(root).as_posix()
+                    return rel, f"path casing adjusted (file found at '{rel}')"
+        except OSError:
+            pass
+
+    # 3. Omitted extension recovery (e.g. `code_exec_parser` -> `code_exec_parser.py`)
+    if "." not in filename:
+        for ext in [".py", ".ts", ".js", ".jsx", ".tsx", ".go", ".rs", ".json", ".md", ".sh"]:
+            cand = p + ext
+            if (root / cand).exists():
+                return cand, f"missing extension '{ext}' added (file found at '{cand}')"
+
+    # 4. Project-wide lookup (suffix match and unique basename match)
+    project_files = _get_project_files(root)
+
+    # 4a. Suffix match (e.g. `test_code_exec_parser.py` -> `tests/test_code_exec_parser.py`)
+    suffix_matches = [f for f in project_files if f.endswith("/" + p)]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0], f"path resolved to '{suffix_matches[0]}' (omitted directory restored)"
+
+    # 4b. Unique basename match (e.g. `Header.jsx` -> `src/components/Header.jsx`)
+    if "/" not in p or p.startswith("src/") or p.startswith("app/") or p.startswith("lib/"):
+        basename_matches = [f for f in project_files if Path(f).name == filename]
+        if len(basename_matches) == 1:
+            return basename_matches[0], f"resolved to unique project file '{basename_matches[0]}'"
+
+    # 4c. Fuzzy basename match (case-insensitive + hyphen/underscore)
+    norm_fn = filename.lower().replace("-", "_")
+    fuzzy_matches = [f for f in project_files if Path(f).name.lower().replace("-", "_") == norm_fn]
+    if len(fuzzy_matches) == 1:
+        return fuzzy_matches[0], f"resolved fuzzy path to '{fuzzy_matches[0]}'"
+
+    return None, ""
+
+
+def _norm_path(raw: str, for_existing: bool = True) -> str:
     """`**./src\\a.js**` -> `src/a.js`; absolute paths inside the project become relative."""
     p = raw.strip().strip("*`'\"").strip()
     if p.startswith("regex:"):
@@ -415,22 +588,18 @@ def _norm_path(raw: str) -> str:
         _warn(f"absolute path made project-relative: {rel.as_posix()}")
         return rel.as_posix()
 
-    # Smart prefix recovery: if the path doesn't exist, try stripping a leading
-    # `src/`, `app/`, `lib/`, or `packages/` segment (common LLM hallucination).
     from code_exec_types import ROOT as _ROOT
-    if not (_ROOT / p).exists():
-        parts = p.split("/", 1)
-        if len(parts) == 2 and parts[0] in {"src", "app", "lib", "packages", "source"}:
-            candidate = parts[1]
-            if (_ROOT / candidate).exists():
-                _warn(f"path prefix '{parts[0]}/' stripped (file found at '{candidate}')")
-                return candidate
+    resolved, reason = _resolve_hallucinated_path(p, _ROOT, for_existing=for_existing)
+    if resolved:
+        if reason:
+            _warn(reason)
+        return resolved
 
     return p
 
 
-def _path(raw: str) -> str:
-    return clean_path(_norm_path(raw))
+def _path(raw: str, for_existing: bool = True) -> str:
+    return clean_path(_norm_path(raw, for_existing=for_existing))
 
 
 # --------------------------------------------------------------------------- #
@@ -881,13 +1050,13 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         pair = _ARROW.match(rest) or re.match(r"^(\S.*?)\s+to\s+(\S.*)$", rest, re.IGNORECASE)
         if not pair:
             raise ValueError(f"{command} requires 'source -> destination'")
-        return Operation(command, (_path(pair[1]), _path(pair[2]))), i
+        return Operation(command, (_path(pair[1], for_existing=True), _path(pair[2], for_existing=False))), i
 
     if command == "CHMOD":
         parts = rest.rsplit(None, 1)
         if len(parts) != 2:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
-        return Operation("CHMOD", (_path(parts[0]), parts[1].strip())), i
+        return Operation("CHMOD", (_path(parts[0], for_existing=True), parts[1].strip())), i
     if command == "FETCH":
         # Supports:
         #   FETCH path
@@ -901,20 +1070,22 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
             if parts[0].lower() in {"function", "func", "def", "class"}:
                 # e.g., FETCH func my_func: path
                 target_arg = parts[1].strip()
-                p_arg = _path(parts[0])
+                p_arg = _path(parts[0], for_existing=True)
             else:
-                p_arg = _path(parts[0].rstrip(":"))
+                p_arg = _path(parts[0].rstrip(":"), for_existing=True)
                 r_arg = target_arg
         elif ":" in parts[0]:
             p_cand, r_cand = parts[0].rsplit(":", 1)
-            p_arg = _path(p_cand)
+            p_arg = _path(p_cand, for_existing=True)
             r_arg = r_cand.strip()
         else:
-            p_arg = _path(rest.rstrip(":"))
+            p_arg = _path(rest.rstrip(":"), for_existing=True)
             r_arg = ""
         return Operation("FETCH", (p_arg, r_arg) if r_arg else (p_arg,)), i
-    if command in {"DELETE", "MKDIR", "TOUCH"}:
-        return Operation(command, (_path(rest.rstrip(":")),)), i
+    if command == "DELETE":
+        return Operation(command, (_path(rest.rstrip(":"), for_existing=True),)), i
+    if command in {"MKDIR", "TOUCH"}:
+        return Operation(command, (_path(rest.rstrip(":"), for_existing=False),)), i
 
     # Commands that carry a content block. The opener may trail the path: `CREATE a.py <<<`.
     inline_block = False
@@ -923,7 +1094,8 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         rest = opener.group(1)
         inline_block = True
 
-    path = _path(rest.rstrip(":").strip())
+    for_exist = command != "CREATE"
+    path = _path(rest.rstrip(":").strip(), for_existing=for_exist)
 
     if command in {"CREATE", "APPEND", "PREPEND", "PATCH"}:
         content, i = read_block(lines, i, inline_started=inline_block)
