@@ -502,6 +502,34 @@ class TestResilienceAndSecurity(unittest.TestCase):
                 fs.run("python3 -c \"print('inline test')\"")
                 mock_run.assert_called_once()
 
+    def test_realfs_run_output_copied_to_clipboard(self):
+        from unittest.mock import patch, MagicMock
+        from code_exec_types import CommandFailed
+
+        fs = RealFS(timeout=5)
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "Test run output line 1\nTest run output line 2\n"
+
+        copied = []
+        with patch("code_exec_parser.set_clipboard", side_effect=lambda txt: copied.append(txt)), \
+             patch("subprocess.run", return_value=mock_proc):
+            fs.run("pytest")
+            self.assertEqual(len(copied), 1)
+            self.assertEqual(copied[0], "Test run output line 1\nTest run output line 2")
+
+        # Test failure includes output in CommandFailed
+        mock_proc_fail = MagicMock()
+        mock_proc_fail.returncode = 1
+        mock_proc_fail.stdout = "FAILED (failures=1)\n"
+
+        with patch("code_exec_parser.set_clipboard"), \
+             patch("subprocess.run", return_value=mock_proc_fail):
+            with self.assertRaises(CommandFailed) as ctx:
+                fs.run("pytest")
+            self.assertIn("FAILED (failures=1)", str(ctx.exception))
+            self.assertIn("exit 1", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

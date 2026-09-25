@@ -226,6 +226,7 @@ class RealFS:
         self.journal: list[tuple] = []
         self.backup_dir: Path | None = None
         self.ran_commands: list[str] = []
+        self.ran_outputs: list[str] = []
         self._counter = 0
 
     def lexists(self, path):
@@ -363,15 +364,45 @@ class RealFS:
             run_env.update(extra_env)
 
         try:
-            result = subprocess.run(actual_cmd, shell=True, cwd=ROOT, timeout=limit, env=run_env)
+            result = subprocess.run(
+                actual_cmd,
+                shell=True,
+                cwd=ROOT,
+                timeout=limit,
+                env=run_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
         except subprocess.TimeoutExpired:
             raise CommandFailed(
                 f"Command timed out after {self.timeout}s: {actual_cmd}"
             ) from None
-        if result.returncode != 0:
-            raise CommandFailed(
-                f"Command failed (exit {result.returncode}): {actual_cmd}"
-            )
+
+        stdout_text = getattr(result, "stdout", "")
+        if isinstance(stdout_text, str) and stdout_text:
+            sys.stdout.write(stdout_text)
+            if not stdout_text.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+            if stdout_text.strip():
+                self.ran_outputs.append(stdout_text.strip())
+
+        combined_output = "\n\n".join(out for out in self.ran_outputs if out.strip())
+        if combined_output.strip():
+            try:
+                from code_exec_parser import set_clipboard
+                set_clipboard(combined_output.strip())
+                c = ui.palette
+                print(c.paint("  📋 Run output copied to clipboard!\n", c.AMBER, bold=True))
+            except Exception:
+                pass
+
+        if getattr(result, "returncode", 0) != 0:
+            err_msg = f"Command failed (exit {result.returncode}): {actual_cmd}"
+            if isinstance(stdout_text, str) and stdout_text.strip():
+                err_msg += f"\n\nOutput:\n{stdout_text.strip()}"
+            raise CommandFailed(err_msg)
 
     def rollback(self) -> list[str]:
         errors = []
