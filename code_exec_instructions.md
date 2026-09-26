@@ -1,6 +1,6 @@
 # code_exec plans
 
-You modify an existing project by emitting a plan that the `code-exec` engine parses and applies.
+You modify an existing project by emitting a plan that the `code-exec` engine parses and applies deterministically.
 
 ## Workflow
 1. **Context check**:
@@ -20,13 +20,13 @@ COMMAND args
 Use a fence with 4+ backticks (more than any backtick run inside the content).
 
 ## Commands (UPPER CASE, one per line)
-- `CREATE path <<< content >>>`: new file (fails if it exists)
+- `CREATE path <<< content >>>`: new file (fails if it already exists; use `EDIT` for existing files)
 - `EDIT path` + one or more search/replace blocks (see below)
-- `REPLACE_ALL path` + same blocks; replaces every match
-- `INSERT_BEFORE|INSERT_AFTER path` + `MARKER` / `CONTENT` blocks (same two styles)
+- `REPLACE_ALL path` + same blocks; replaces every match in the file
+- `INSERT_BEFORE|INSERT_AFTER path` + `MARKER` / `CONTENT` blocks
 - `PATCH path <<< unified diff >>>`
 - `APPEND|PREPEND path <<< content >>>`
-- `FETCH path[:start-end|:symbol]`: request full file, line slice, or function/class onto clipboard (e.g. `FETCH src/app.py:my_func` or `FETCH src/models.py:User.save`)
+- `FETCH path[:start-end|:symbol]`: request full file, line slice, or function/class onto clipboard (e.g. `FETCH src/app.py:my_func` or `FETCH src/models.py:User.save`). **Batch all FETCH lines in ONE block.**
 - `MKDIR path` · `DELETE path` (file or folder) · `TOUCH path` · `CHMOD path +x|755`
 - `MOVE|COPY|RENAME src -> dst` (globs/regex allowed: `MOVE test* -> dest`, `MOVE regex:^log_.* -> logs`)
 - `RUN cmd`: execute a test, Python script, or curl command (e.g. `RUN pytest`, `RUN python script.py`, `RUN python3 script.py`, `RUN curl https://...`). Whitelisted test runners run automatically; custom scripts, Python runs, and curl commands prompt the user interactively in the terminal for approval (`accept`). Dangerous patterns (`rm -rf`, `sudo`, `curl | sh`, `-c`) are forbidden.
@@ -34,7 +34,8 @@ Use a fence with 4+ backticks (more than any backtick run inside the content).
 
 ## Block syntax: pick ONE style per block, never mix
 
-**Style A: keywords.** Both keywords are required, each with its own opener and closer.
+### Style A: keywords
+Both keywords are required, each with its own opener `<` and closer `>>>`.
 ```
 EDIT src/app.py
 SEARCH <
@@ -44,7 +45,9 @@ REPLACE <
 new text
 >>>
 ```
-**Style B: conflict markers.** No `SEARCH`/`REPLACE` words at all.
+
+### Style B: conflict markers
+No `SEARCH`/`REPLACE` words at all.
 ```
 EDIT src/app.py
 <<
@@ -53,17 +56,58 @@ old text
 new text
 >>>>
 ```
-(`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` also works.)
+(`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` is also accepted.)
 
-**Never** combine `SEARCH <<<` with `=======` or `====`. The parser reads a keyword block up to the first `>>`/`>>>` line, so the separator gets swallowed into the search text and parsing fails with `EDIT requires REPLACE <<< ...`.
+**Never** combine `SEARCH <<<` with `=======` or `====`. The parser reads a keyword block up to the first `>>`/`>>>` line, so the separator gets swallowed into the search text and parsing fails.
 
-Several edits to one file: repeat blocks under a single `EDIT path`, in the same style. `INSERT_*` works the same way with `MARKER`/`CONTENT` in place of `SEARCH`/`REPLACE`.
+---
 
-Delimiter rules:
-- Delimiters sit alone on their own line; content is verbatim.
-- Openers: 1–5 `<`. Closers: 2–5 `>` (Style A) or 3+ `>` (Style B). A lone `>` is content.
-- Content must not contain a line that is only `>>`/`>>>`, `====`, or `<<<`. If it must, use a different block style or a longer fence.
-- Never leave a block open.
+## Sizing SEARCH blocks & Multiple Edits (CRITICAL)
+
+### 1. Keep SEARCH blocks small (3–8 lines)
+- ❌ **NEVER dump 50, 100, or 150+ lines into a SEARCH block.** Oversized blocks slow down matching and cause boundary drift.
+- ✅ Include only **3–8 lines** around the specific lines you need to change.
+- ✅ If you are changing 3 lines in the middle of a 200-line file, your SEARCH block should only be ~5 lines long.
+
+### 2. Multiple edits in one file: use multiple blocks
+If you need to change lines at line 10 and line 150, **do NOT** create one giant block spanning line 10 to line 150! Repeat blocks under a single `EDIT path`:
+
+```
+EDIT src/components/Dashboard.jsx
+SEARCH <
+import { OldButton } from './ui/OldButton';
+>>>
+REPLACE <
+import { NewButton } from './ui/NewButton';
+>>>
+SEARCH <
+  const [isOpen, setIsOpen] = useState(false);
+  return (
+>>>
+REPLACE <
+  const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  return (
+>>>
+```
+
+### 3. Boundary anchors for large section rewrites (>20 lines)
+If you genuinely need to replace an entire large function or JSX tree (>20 lines):
+- Do **NOT** output the entire middle of the block in `SEARCH`.
+- Output only the **first 4 lines + last 4 lines** of the target block as `SEARCH`.
+- Put the complete new replacement code in `REPLACE`. The engine automatically matches the full enclosed region.
+
+---
+
+## Syntax & Bracket Balance (Preventing FUZZY_SYNTAX_ERROR)
+
+- ❌ **NEVER emit unbalanced brackets or unclosed tags in REPLACE.**
+  - Check that all `{`, `(`, `[`, and `<tag>` opened in `REPLACE` are properly closed.
+  - If you open a `<div>` or `{` in your replacement, ensure the corresponding `</div>` or `}` is present.
+  - Unbalanced brackets or broken syntax trigger `ERR|FUZZY_SYNTAX_ERROR` and abort execution.
+- ✅ **Always inspect surrounding lines**: Ensure your replacement connects cleanly with the existing code immediately before and after the `SEARCH` anchor.
+
+---
 
 ## Anti-hallucination rules (read carefully — these prevent the most common errors)
 
@@ -101,7 +145,10 @@ Delimiter rules:
   - Do NOT write `\%`, `\sim`, `\textasciitilde`, `\textasciicircum` — write literal `%`, `~`, `^`.
 - ✅ **ALWAYS output raw literal ASCII characters.** All text inside the `code_exec` block is raw source code, NEVER LaTeX or Markdown math formatting.
 
-### Skeleton context & FETCH workflow (Batch Requests)
+---
+
+## Skeleton context & FETCH workflow (Batch Requests)
+
 When provided with skeleton or compact context to conserve tokens, or whenever you need exact file contents:
 1. Examine the project tree, classes, and function signatures.
 2. **Never guess file contents from memory**: If you need to edit an existing file whose code isn't in your context, DO NOT write a speculative SEARCH block. Request the code with `FETCH`.
@@ -121,24 +168,24 @@ FETCH src/utils/helpers.js:1-50
 
 5. The `code-exec` engine reads all requested files/slices/symbols and copies their contents directly onto the user's clipboard (or saves them to `context/FETCHED_CONTEXT.md` if the payload is very large). In the next turn, emit the definitive `EDIT` / `CREATE` operations based on the exact lines returned.
 
-## Rules
-- Paths are project-relative (`src/App.jsx`). No `..`, absolute paths or `.git`. Never touch `.env*`, keys/certs, `.github/workflows/*`, `.gitlab-ci.yml`.
-- No contradictory ops on one file (double `CREATE`, edit after `DELETE`). Order operations so dependencies exist first.
-- **SEARCH must exist verbatim and match exactly once**: 3–6 lines with a unique anchor (max 60 lines / 4000 chars). Prefer several small blocks over one big one. Copy lines from the provided file or diff (`+` lines = current file); never guess.
-- In JSX/HTML, never search bare tags (`<div>`, `return (`). Use unique classes, props or text.
-- REPLACE only what must change; preserve indentation. Whitespace/indentation differences are tolerated; code, strings and attributes are not.
-- **Boundary anchor for large replacements (>20–30 lines)**: do not output the middle. Give only the first 4 and last 4 lines of the region as SEARCH; the engine matches the whole range.
-- Use `CREATE` for new files, `EDIT` for existing ones.
-- **When to use `RUN`**: You can emit `RUN` for tests (`pytest`, `python3 -m unittest`), running Python scripts (`RUN python script.py`), or network requests (`RUN curl ...`) when requested or needed for the task. The user will be prompted interactively in the terminal to accept or deny execution. Never emit destructive commands (`rm -rf`, `sudo`, `curl | sh`).
+---
 
-## Errors (a diagnostic is copied to the clipboard; fix it and resend the WHOLE plan)
-- `PLAN_NOT_FOUND`: no closed block, or output was cut off · `MULTIPLE_PLANS`: send exactly one block
-- `SEARCH_NOT_FOUND`: copy real lines from the file (look at `+` lines in the diff shown) · `SEARCH_AMBIGUOUS`: add 1–3 context lines · `SEARCH_TOO_BIG`: shrink or use boundary anchors
-- `CREATE_EXISTS`: use EDIT · `FILE_NOT_FOUND` / `DELETE_NOT_FOUND`: check the path or CREATE
-- `INVALID_PATH` / `FILE_PROTECTED`: don't modify · `CONFLICTING_OPERATIONS`: merge or reorder
-- `FORBIDDEN_COMMAND`: use an allowed `RUN` · `UNKNOWN_COMMAND`: bad name, or prose inside the block · `PATCH_FAILED`: fix hunk context
-- Parse errors name the line (`line 12: …`, `Missing >>> for block opened at line 30`). Check that line for a mixed block style or an unclosed block.
+## Errors & Fast Diagnostic Recovery
+When an execution fails, a diagnostic error is automatically copied to the user's clipboard. When the user pastes the error, emit a single revised `code_exec` block with the fix:
+
+| Error Code | Cause | Immediate Fix |
+|---|---|---|
+| `SEARCH_NOT_FOUND` | SEARCH anchor does not match file lines verbatim | Copy 3–5 exact lines from the provided file or diff (`+` lines) |
+| `SEARCH_AMBIGUOUS` | Anchor matches in multiple places | Add 1–3 unique surrounding context lines above or below |
+| `SEARCH_TOO_BIG` | Block exceeds 60 lines or 4000 characters | Split into multiple small edits or use first 4 + last 4 boundary anchor |
+| `FUZZY_SYNTAX_ERROR` | Replacement has unbalanced `{ }`, `( )`, `[ ]` or unclosed JSX tags | Fix bracket/tag balance in `REPLACE` or provide exact verbatim `SEARCH` |
+| `CREATE_EXISTS` | File already exists on disk | Use `EDIT path` instead of `CREATE path` |
+| `FILE_NOT_FOUND` | File does not exist to edit | Check path spelling, or use `CREATE` if file is new |
+| `MULTIPLE_PLANS` | Two or more `code_exec` blocks emitted | Combine all changes into a single `code_exec` block |
+| `PLAN_NOT_FOUND` | Fence was unclosed or cut off | Ensure code block closes with ` ```` ` and is not truncated |
+| `UNKNOWN_COMMAND` | Prose or comment inside code block | Move all explanations outside the fenced block |
 
 ## CLI helpers
 - `code-exec -c`: builds a commit prompt from `git diff`.
 - `code-exec check` / `--check`: validates plan parsing and syntax only, without touching or checking the filesystem.
+- `code-exec -p --short`: copies the compact edition of these instructions for fast/small models.

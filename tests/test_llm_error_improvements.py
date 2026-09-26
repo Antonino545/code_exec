@@ -85,7 +85,7 @@ class TestErrorGuidance(unittest.TestCase):
     def test_search_ambiguous_guidance(self):
         g = self._guidance("ERR|SEARCH_AMBIGUOUS|foo.py|matched 2 times")
         self._assert_has_do_and_dont(g, "SEARCH_AMBIGUOUS")
-        self.assertIn("anchor", g.lower())
+        self.assertIn("context", g.lower())
 
     def test_search_too_big_guidance(self):
         g = self._guidance("ERR|SEARCH_TOO_BIG|foo.py")
@@ -114,7 +114,7 @@ class TestErrorGuidance(unittest.TestCase):
         error_msg = f"ERR|FILE_NOT_FOUND|{real_file.name}_missing.py"
         g = _get_error_guidance(error_msg)
         # The parent dir is ROOT, so nearby files should be listed
-        self.assertIn("Nearby files", g)
+        self.assertIn("Possible files/folders:", g)
 
     def test_conflicting_operations_guidance(self):
         g = self._guidance("ERR|CONFLICTING_OPERATIONS|foo.py")
@@ -633,6 +633,22 @@ class TestInstructionsAntiHallucination(unittest.TestCase):
             "Expected block-style mixing warning in instructions"
         )
 
+    def test_has_search_sizing_and_multiedit_guidance(self):
+        self.assertIn("Keep SEARCH blocks small", self.instructions)
+        self.assertIn("Multiple edits in one file", self.instructions)
+
+    def test_has_syntax_bracket_balance_guidance(self):
+        self.assertIn("FUZZY_SYNTAX_ERROR", self.instructions)
+        self.assertIn("bracket", self.instructions.lower())
+
+    def test_short_instructions_contain_sizing_and_bracket_balance(self):
+        short = (
+            Path(__file__).resolve().parent.parent / "code_exec_instructions_short.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Keep SEARCH small", short)
+        self.assertIn("FUZZY_SYNTAX_ERROR", short)
+
+
 
 # ============================================================
 # 9. --verbose CLI flag wires through correctly
@@ -694,12 +710,72 @@ class TestErrorGuidanceRegression(unittest.TestCase):
             "ERR|FORBIDDEN_COMMAND|x",
             "ERR|UNKNOWN_COMMAND|x",
             "ERR|PATCH_FAILED|f.py",
+            "ERR|FUZZY_SYNTAX_ERROR|f.py",
         ]
         for code in error_codes:
             with self.subTest(code=code):
                 g = _get_error_guidance(code)
                 self.assertIn("❌", g, f"Missing ❌ for {code}")
                 self.assertIn("✅", g, f"Missing ✅ for {code}")
+
+    def test_error_lines_wrapping_preserves_syntax_error_details(self):
+        """Long error lines with ERR|FUZZY_SYNTAX_ERROR must wrap cleanly without being truncated to '...'"""
+        from code_exec_ui import ui
+        err_msg = (
+            "Validation failed: Operation 1 ( EDIT     apps/react-ui/src/shared/components/TransitProblemBanner.jsx +176 −26) [plan line 1]: "
+            "ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in apps/react-ui/src/shared/components/TransitProblemBanner.jsx (lines 1-176) broke bracket balance: curly brace unclosed (1)\n\n"
+            "No files were modified."
+        )
+        lines = ui._error_lines(err_msg, rule_w=80)
+        # Recombine visible text
+        combined = " ".join(lines)
+        self.assertIn("ERR|FUZZY_SYNTAX_ERROR", combined)
+        self.assertIn("curly brace unclosed (1)", combined)
+        self.assertIn("TransitProblemBanner.jsx", combined)
+
+    def test_oversized_jsx_boundary_anchor_fast_match(self):
+        """Oversized JSX blocks with quote drift match rapidly via boundary anchors without freezing in fuzzy search."""
+        import time
+        from code_exec_matcher import find_unique
+
+        doc_lines = [
+            'import React from "react";',
+            'import { Box, Typography } from "@mui/material";',
+            'import WarningIcon from "@mui/icons-material/Warning";',
+            'import { useTranslation } from "react-i18next";',
+        ]
+        for i in range(5, 180):
+            doc_lines.append(f'  const value_{i} = useMemo(() => compute({i}), []);')
+        doc_lines.extend([
+            '  return <Box><WarningIcon /><Typography>{msg}</Typography></Box>;',
+            '};',
+            'export default TransitProblemBanner;',
+        ])
+        doc = "\n".join(doc_lines) + "\n"
+
+        # Needle has single quotes (JSX drift) and is 150+ lines
+        needle_lines = [
+            "import React from 'react';",
+            "import { Box, Typography } from '@mui/material';",
+            "import WarningIcon from '@mui/icons-material/Warning';",
+            "import { useTranslation } from 'react-i18next';",
+        ]
+        for i in range(5, 150):
+            needle_lines.append(f'  const value_{i} = useMemo(() => compute({i}), []);')
+        needle_lines.extend([
+            '  return <Box><WarningIcon /><Typography>{msg}</Typography></Box>;',
+            '};',
+            'export default TransitProblemBanner;',
+        ])
+        needle = "\n".join(needle_lines) + "\n"
+
+        t0 = time.time()
+        res = find_unique(doc, needle, "SEARCH", "TransitProblemBanner.jsx")
+        elapsed = time.time() - t0
+
+        self.assertLess(elapsed, 1.0, f"Search took too long ({elapsed:.2f}s); boundary anchors should be instant")
+        self.assertTrue(res.fuzzy)
+        self.assertIn("boundary anchors", res.note)
 
 
 if __name__ == "__main__":

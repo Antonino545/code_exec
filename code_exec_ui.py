@@ -1382,9 +1382,11 @@ class TerminalUI:
 
     def _error_lines(self, message: str, rule_w: int) -> list[str]:
         """Colourise a diagnostic: ERR| tokens, similarity matches and embedded diffs."""
+        import textwrap
         c = self.palette
         out: list[str] = []
         in_diff = False
+        usable_w = max(45, rule_w - 6)
         for line in message.split("\n"):
             stripped = line.strip()
             if not stripped:
@@ -1399,15 +1401,42 @@ class TerminalUI:
                 continue
             if "ERR|" in stripped:
                 prefix, token = stripped.split("ERR|", 1)
-                out.append(self._line(f"{prefix}{c.paint('ERR|' + token, c.AMBER, bold=True)}"))
+                if "|" in token:
+                    err_code, err_detail = token.split("|", 1)
+                else:
+                    err_code, err_detail = token, ""
+
+                # If there is an operation / validation prefix, display it clearly
+                if prefix.strip():
+                    clean_prefix = prefix.strip().rstrip(":")
+                    for p_line in textwrap.wrap(clean_prefix, width=usable_w):
+                        out.append(self._line(p_line, c.RED, bold=True))
+
+                err_badge = c.paint(f"ERR|{err_code}", c.AMBER, bold=True)
+                if err_detail:
+                    detail_w = max(35, usable_w - 6)
+                    wrapped = textwrap.wrap(err_detail, width=detail_w)
+                    if wrapped:
+                        out.append(self._line(f"{err_badge}  {c.paint(wrapped[0], c.WHITE)}"))
+                        for extra_ln in wrapped[1:]:
+                            out.append(self._line(f"      {c.paint(extra_ln, c.SLATE)}"))
+                    else:
+                        out.append(self._line(err_badge))
+                else:
+                    out.append(self._line(err_badge))
             elif stripped.startswith("Closest candidate"):
                 badge = c.paint(" SIMILARITY ", c.CYAN, bold=True)
                 out.append(self._line(f"{badge} {c.paint(stripped, c.WHITE)}"))
             else:
-                out.append(self._line(line, c.RED))
+                if len(line) > usable_w:
+                    for w_ln in textwrap.wrap(line, width=usable_w):
+                        out.append(self._line(w_ln, c.RED))
+                else:
+                    out.append(self._line(line, c.RED))
         return out
 
     _ERROR_HINTS = (
+        ("FUZZY_SYNTAX_ERROR", "Fuzzy replacement produced invalid syntax or unbalanced brackets. Use an exact SEARCH anchor to avoid boundary drift."),
         ("SEARCH_TOO_BIG", "SEARCH block is too large (limit is 60 lines / 4000 chars). Use a smaller unique anchor."),
         ("SEARCH_NOT_FOUND", "SEARCH block didn't match. Compare against the diff above and add unique lines."),
         ("SEARCH_AMBIGUOUS", "SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."),

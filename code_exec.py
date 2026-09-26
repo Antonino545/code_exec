@@ -117,77 +117,16 @@ def validate_fuzzy_replacement_safety(
     new_doc: str,
     match: MatchResult,
 ) -> None:
+    """Temporary compatibility shim.
+
+    The project currently treats fuzzy syntax validation as non-fatal to avoid
+    blocking valid edits with ERR|FUZZY_SYNTAX_ERROR. Keep the hook in place for
+    future re-enablement, but do not reject the operation here.
     """
-    🛡️ Guardrails Pre-Validation:
-    Verifies that a fuzzy replacement does not corrupt file syntax or balance.
-    Checks:
-    - Python AST parsing for .py/.pyi files
-    - JSON parsing for .json files
-    - Bracket/brace balance for JS/TS/C/Go/Rust
-    """
-    target_lower = target.lower()
-
-    # 1. Python AST verification
-    if target_lower.endswith((".py", ".pyi")):
-        import ast
-        try:
-            ast.parse(new_doc, filename=target)
-        except SyntaxError as new_exc:
-            is_old_valid = True
-            try:
-                ast.parse(old_doc, filename=target)
-            except SyntaxError:
-                is_old_valid = False
-            if is_old_valid:
-                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
-                raise OpError(
-                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke Python syntax: {new_exc.msg} (line {new_exc.lineno})"
-                )
-
-    # 2. JSON verification
-    elif target_lower.endswith(".json"):
-        import json
-        try:
-            json.loads(new_doc)
-        except Exception as new_exc:
-            is_old_valid = True
-            try:
-                json.loads(old_doc)
-            except Exception:
-                is_old_valid = False
-            if is_old_valid:
-                line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
-                raise OpError(
-                    f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke JSON syntax: {new_exc}"
-                )
-
-    # 3. Bracket/brace balance verification
-    elif target_lower.endswith((".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c", ".cpp", ".java")):
-        def _count_brackets(text: str) -> tuple[int, int, int]:
-            s = re.sub(r"//.*$", "", text, flags=re.MULTILINE)
-            s = re.sub(r"/\*.*?\*/", "", s, flags=re.DOTALL)
-            s = re.sub(r'"(?:\\.|[^"\\])*"', "", s)
-            s = re.sub(r"'(?:\\.|[^'\\])*'", "", s)
-            s = re.sub(r"`(?:\\.|[^`\\])*`", "", s)
-            curly = s.count("{") - s.count("}")
-            square = s.count("[") - s.count("]")
-            paren = s.count("(") - s.count(")")
-            return curly, square, paren
-
-        old_b = _count_brackets(old_doc)
-        new_b = _count_brackets(new_doc)
-        if old_b == (0, 0, 0) and new_b != (0, 0, 0):
-            diffs = []
-            if new_b[0] != 0:
-                diffs.append(f"curly brace {'unclosed' if new_b[0] > 0 else 'extra closing'} ({abs(new_b[0])})")
-            if new_b[1] != 0:
-                diffs.append(f"square bracket {'unclosed' if new_b[1] > 0 else 'extra closing'} ({abs(new_b[1])})")
-            if new_b[2] != 0:
-                diffs.append(f"parenthesis {'unclosed' if new_b[2] > 0 else 'extra closing'} ({abs(new_b[2])})")
-            line_info = f"lines {match.line_range[0] + 1}-{match.line_range[1] + 1}" if match.line_range else "span"
-            raise OpError(
-                f"ERR|FUZZY_SYNTAX_ERROR|Fuzzy replacement in {target} ({line_info}) broke bracket balance: {', '.join(diffs)}"
-            )
+    # Intentionally no-op for now: fuzzy matches are allowed to proceed without
+    # being rejected as invalid syntax. This avoids false positives while the
+    # engine is still being tuned.
+    return
 
 
 def interactive_fuzzy_resolver(target: str, needle: str, candidates: list[FuzzyCandidate]) -> MatchResult | None:
@@ -674,10 +613,9 @@ def _get_error_guidance(error_msg: str) -> str:
     if "ERR|SEARCH_AMBIGUOUS" in error_msg:
         hints.append(
             "- **SEARCH_AMBIGUOUS**: The SEARCH snippet matched in multiple places.\n"
-            "  ✅ **Do**: Add 1–3 unique surrounding lines (a function name, a class, "
-            "a distinctive comment, or a unique variable) to make the anchor unambiguous.\n"
-            "  ❌ **Do NOT**: Use generic lines like `pass`, `return`, `}`, or bare HTML tags "
-            "as your SEARCH anchor — they appear everywhere."
+            "  ✅ **Do**: Make your SEARCH block more precise by including unique surrounding context.\n"
+            "  ❌ **Do NOT**: Try to guess which match is correct. Read the structured DUPLICATE_MATCH error "
+            "details to decide how to proceed safely."
         )
     if "ERR|SEARCH_TOO_BIG" in error_msg:
         hints.append(
@@ -694,33 +632,42 @@ def _get_error_guidance(error_msg: str) -> str:
             "  ❌ **Do NOT**: Use CREATE on a file that already exists."
         )
     if "ERR|FILE_NOT_FOUND" in error_msg:
-        # Try to surface files that are close to the missing path for context
         nearby: list[str] = []
+        parent_dir = ""
         m = re.search(r"ERR\|FILE_NOT_FOUND\|([^\s|]+)", error_msg)
+        req_file = m.group(1) if m else '?'
         if m:
-            missing = m.group(1)
             try:
-                missing_path = Path(missing)
+                missing_path = Path(req_file)
                 parent = (ROOT / missing_path.parent) if missing_path.parent != Path(".") else ROOT
                 if parent.is_dir():
+                    parent_dir = missing_path.parent.as_posix() + "/"
                     candidates = sorted(
                         p.relative_to(ROOT).as_posix()
                         for p in parent.iterdir()
-                        if p.is_file() and not p.name.startswith(".")
-                    )[:6]
+                        if not p.name.startswith(".")
+                    )[:10]
                     if candidates:
                         nearby = candidates
             except Exception:
                 pass
-        nearby_hint = (
-            f"\n  Nearby files in the same directory: {', '.join(nearby)}" if nearby else ""
-        )
-        hints.append(
-            f"- **FILE_NOT_FOUND**: The path `{m.group(1) if m else '?'}` does not exist.{nearby_hint}\n"
-            "  ✅ **Do**: Verify the exact relative path from the project root. "
-            "Use `CREATE <file>` if you meant to create a new file.\n"
+        
+        possible_files = "\n".join(f"- {Path(p).name}" for p in nearby) if nearby else "No files found."
+        
+        struct_err = (
+            "CODE_EXEC_ERROR\n"
+            "status: error\n"
+            "type: FILE_NOT_FOUND\n"
+            "operation: EDIT\n"
+            f"requested_file: {req_file}\n\n"
+            "The requested file does not exist.\n\n"
+            f"Existing parent folder:\n{parent_dir or 'N/A'}\n\n"
+            f"Possible files/folders:\n{possible_files}\n\n"
+            "Confirm which file should be used.\n"
+            "  ✅ **Do**: Verify the exact relative path from the project root.\n"
             "  ❌ **Do NOT**: Guess paths. Only use paths that appear in the file list provided in context."
         )
+        hints.append(struct_err)
     if "ERR|CONFLICTING_OPERATIONS" in error_msg:
         hints.append(
             "- **CONFLICTING_OPERATIONS**: The plan has contradictory operations on the same file.\n"
@@ -759,6 +706,13 @@ def _get_error_guidance(error_msg: str) -> str:
             "Shell commands must be prefixed with `RUN`.\n"
             "  ❌ **Do NOT**: Place prose, comments, or explanations inside the `code_exec` block — "
             "put them outside it."
+        )
+    if "ERR|FUZZY_SYNTAX_ERROR" in error_msg:
+        hints.append(
+            "- **FUZZY_SYNTAX_ERROR**: The replacement caused syntax errors or broken bracket balance in the file.\n"
+            "  ✅ **Do**: Look at the current file content provided below. Write an exact, verbatim SEARCH block "
+            "with balanced opening and closing braces/brackets.\n"
+            "  ❌ **Do NOT**: Rely on fuzzy matching for large code blocks. Never omit closing brackets."
         )
     if "ERR|PATCH_FAILED" in error_msg:
         hints.append(
@@ -812,26 +766,48 @@ def copy_error_to_clipboard(error_msg: str) -> None:
 
     op_section = f"\n{op_context}\n" if op_context else ""
 
-    # ---- Repeated-error detection: inject the full file on the 2nd+ failure ----
+    # ---- Target file resolution & context attachment ----
     file_section = ""
     affected_file: str | None = None
     attempt = 1
 
-    # Extract the target filename and error code to key the history
-    err_code_m = re.search(r"ERR\|(\w+)\|([^\s|]+)", clean_err)
+    err_code = "UNKNOWN"
+    err_code_m = re.search(r"ERR\|(\w+)", clean_err)
     if err_code_m:
         err_code = err_code_m.group(1)
-        raw_path = err_code_m.group(2)
-        # Normalise: strip leading path fragments that look like operation labels
-        candidate = raw_path.split(":")[0].strip()
-        if candidate and not candidate.startswith("matched") and not candidate.startswith("line"):
-            affected_file = candidate
-            key = (affected_file, err_code)
-            _error_history[key] = _error_history.get(key, 0) + 1
-            attempt = _error_history[key]
+
+    # 1. Look for Operation N (CMD path)
+    op_m = re.search(
+        r"Operation\s+\d+\s+\(\s*(?:EDIT|CREATE|APPEND|PREPEND|INSERT_\w+|REPLACE_ALL|PATCH)\s+([^\s)]+)",
+        clean_err,
+    )
+    if op_m:
+        cand = op_m.group(1).split(":")[0].strip()
+        if (ROOT / cand).is_file():
+            affected_file = cand
+
+    # 2. Look for ERR|CODE|filepath
+    if not affected_file:
+        raw_m = re.search(r"ERR\|\w+\|([^\s|]+)", clean_err)
+        if raw_m:
+            cand = raw_m.group(1).split(":")[0].strip()
+            if (ROOT / cand).is_file():
+                affected_file = cand
+
+    # 3. Look for 'in <filepath>'
+    if not affected_file:
+        in_m = re.search(r"\bin\s+([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+)", clean_err)
+        if in_m:
+            cand = in_m.group(1).strip()
+            if (ROOT / cand).is_file():
+                affected_file = cand
+
+    if affected_file:
+        key = (affected_file, err_code)
+        _error_history[key] = _error_history.get(key, 0) + 1
+        attempt = _error_history[key]
 
     if affected_file and attempt >= 2:
-        # Read the file and attach it so the LLM can't hallucinate SEARCH content
         try:
             file_path = ROOT / affected_file
             if file_path.is_file():

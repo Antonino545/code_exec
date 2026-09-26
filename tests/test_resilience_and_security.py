@@ -359,7 +359,10 @@ class TestResilienceAndSecurity(unittest.TestCase):
         with self.assertRaises(OpError) as ctx:
             find_unique(doc, "hello world", "SEARCH", "ambiguous.py")
         err_msg = str(ctx.exception)
-        self.assertIn("ERR|SEARCH_AMBIGUOUS|ambiguous.py|matched 2 times at [line 2, line 4]", err_msg)
+        self.assertIn("ERR|SEARCH_AMBIGUOUS", err_msg)
+        self.assertIn("Found: 2 matches", err_msg)
+        self.assertIn("Match 1: line 2", err_msg)
+        self.assertIn("Match 2: line 4", err_msg)
 
     def test_token_aware_python_matching(self):
         doc = (

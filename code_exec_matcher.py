@@ -188,6 +188,11 @@ def _find_high_similarity_candidates(
     k = len(needle_lines)
     needle_raw_str = "\n".join(needle_lines)
 
+    # Oversized blocks (> MAX_SEARCH_LINES or > MAX_SEARCH_CHARS) must NOT run full-text
+    # sliding-window SequenceMatcher across every line of the file (takes minutes of CPU time).
+    if k > MAX_SEARCH_LINES or len(needle_raw_str) > MAX_SEARCH_CHARS:
+        return []
+
     offsets = []
     pos = 0
     for line in doc_lines:
@@ -223,6 +228,11 @@ def _find_high_similarity_candidates(
                         candidate_windows.add((h_idx, t_idx))
                         bounded_windows.add((h_idx, t_idx))
 
+    # Pre-normalize lines once to avoid millions of regex calls in tight comparison loops
+    doc_norm_lines = [_normalize_code_line_for_fuzzy(ln) for ln in doc_lines]
+    needle_norm_lines = [_normalize_code_line_for_fuzzy(ln) for ln in needle_lines]
+    needle_norm_set = set(ln for ln in needle_norm_lines if ln)
+
     evaluated: list[tuple[float, int, int]] = []
     seen_spans: set[tuple[int, int]] = set()
     for s_line, e_line in candidate_windows:
@@ -236,7 +246,21 @@ def _find_high_similarity_candidates(
             continue
         seen_spans.add((s_line, e_line))
 
+        # Fast set overlap filter for medium/large blocks:
+        # Avoid checking windows sharing almost no lines with needle.
+        if k >= 10 and needle_norm_set and (s_line, e_line) not in bounded_windows:
+            cand_norm_slice = doc_norm_lines[s_line : e_line + 1]
+            overlap = len(needle_norm_set.intersection(cand_norm_slice))
+            if overlap / len(needle_norm_set) < 0.20:
+                continue
+
         cand_str = "\n".join(doc_lines[s_line : e_line + 1])
+        # Fast length pre-filter
+        cand_len = len(cand_str)
+        needle_len = len(needle_raw_str)
+        if 2 * min(cand_len, needle_len) / max(1, cand_len + needle_len) < min_threshold - 0.20:
+            continue
+
         sm = difflib.SequenceMatcher(None, needle_raw_str, cand_str)
         # Fast pre-filtering with quick_ratio
         if sm.quick_ratio() < min_threshold - 0.15:
@@ -438,20 +462,44 @@ def _find_closest_match(doc: str, needle: str) -> str:
     best_end = -1
     best_candidate_lines = []
 
-    window_sizes = {max(1, k - 1), k, k + 1, k + 2}
-    for w in window_sizes:
-        for i in range(len(doc_lines) - w + 1):
-            candidate = doc_lines[i : i + w]
-            candidate_norm = "\n".join(_strip_symbols_and_emojis(ln) for ln in candidate)
-            matcher = difflib.SequenceMatcher(None, needle_norm, candidate_norm)
-            ratio = matcher.quick_ratio()
-            if ratio > 0.35:
-                ratio = matcher.ratio()
+    # For oversized blocks, avoid quadratic sliding window across the entire file
+    if k > MAX_SEARCH_LINES:
+        first_ln = next((ln.strip() for ln in needle_lines if ln.strip()), "")
+        first_norm = _strip_symbols_and_emojis(first_ln)
+        for i, ln in enumerate(doc_lines):
+            if _strip_symbols_and_emojis(ln.strip()) == first_norm:
+                best_start = i
+                best_end = min(len(doc_lines) - 1, i + k - 1)
+                best_candidate_lines = doc_lines[best_start : best_end + 1]
+                best_ratio = 0.60
+                break
+        if best_start == -1:
+            step = max(1, k // 4)
+            for i in range(0, max(1, len(doc_lines) - k + 1), step):
+                candidate = doc_lines[i : i + k]
+                candidate_norm = "\n".join(_strip_symbols_and_emojis(ln) for ln in candidate)
+                matcher = difflib.SequenceMatcher(None, needle_norm, candidate_norm)
+                ratio = matcher.quick_ratio()
                 if ratio > best_ratio:
                     best_ratio = ratio
                     best_start = i
-                    best_end = i + w - 1
+                    best_end = min(len(doc_lines) - 1, i + k - 1)
                     best_candidate_lines = candidate
+    else:
+        window_sizes = {max(1, k - 1), k, k + 1, k + 2}
+        for w in window_sizes:
+            for i in range(len(doc_lines) - w + 1):
+                candidate = doc_lines[i : i + w]
+                candidate_norm = "\n".join(_strip_symbols_and_emojis(ln) for ln in candidate)
+                matcher = difflib.SequenceMatcher(None, needle_norm, candidate_norm)
+                ratio = matcher.quick_ratio()
+                if ratio > 0.35:
+                    ratio = matcher.ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_start = i
+                        best_end = i + w - 1
+                        best_candidate_lines = candidate
 
     if best_ratio >= 0.40 and best_start >= 0:
         start_line = best_start + 1
@@ -487,11 +535,29 @@ BOUNDARY_ANCHOR_THRESHOLD = 30
 
 
 def _format_spans_error(err_prefix: str, target: str, spans: list[tuple[int, int, int, int]]) -> OpError:
-    locations = [f"lines {s + 1}-{e + 1}" if s != e else f"line {s + 1}" for _, _, s, e in spans]
-    loc_str = ", ".join(locations[:6])
-    if len(locations) > 6:
-        loc_str += f", ... (+{len(locations) - 6} more)"
-    return OpError(f"ERR|{err_prefix}_AMBIGUOUS|{target}|matched {len(spans)} times at [{loc_str}]")
+    matches_text = []
+    for i, (_, _, s, e) in enumerate(spans[:10], 1):
+        if s != e:
+            matches_text.append(f"Match {i}: lines {s + 1}-{e + 1}")
+        else:
+            matches_text.append(f"Match {i}: line {s + 1}")
+    if len(spans) > 10:
+        matches_text.append(f"... (+{len(spans) - 10} more)")
+    match_str = "\n".join(matches_text)
+    msg = (
+        f"ERR|{err_prefix}_AMBIGUOUS\n\n"
+        "CODE_EXEC_ERROR\n"
+        "status: error\n"
+        "type: DUPLICATE_MATCH\n"
+        f"operation: {err_prefix}\n"
+        f"file: {target}\n\n"
+        "Expected: 1 match\n"
+        f"Found: {len(spans)} matches\n\n"
+        f"{match_str}\n\n"
+        "The requested code is not unique.\n"
+        "Choose which match should be edited, or specify that one duplicate should be removed."
+    )
+    return OpError(msg)
 
 
 def find_unique(doc: str, needle: str, what: str, target: str) -> MatchResult:
@@ -566,6 +632,121 @@ def find_all(doc: str, needle: str, target: str) -> list[tuple[int, int]]:
     raise OpError(f"ERR|SEARCH_NOT_FOUND|{target} (REPLACE_ALL, first line: {preview!r})")
 
 
+def _match_boundary_anchors(
+    doc_lines: list[str],
+    want_raw: list[str],
+    target: str,
+    what: str,
+    tier_label: str = "Tier 0",
+) -> MatchResult | None:
+    """
+    Intelligent boundary-anchor matching for large or oversized SEARCH blocks.
+    Tries multiple anchor sizes and normalizations (indent, JSX, whitespace, trailing)
+    and resolves ambiguities based on expected block size.
+    """
+    if len(want_raw) < 4:
+        return None
+
+    target_lower = target.lower()
+    is_web = target_lower.endswith(
+        (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".html", ".htm", ".vue", ".svelte", ".astro")
+    )
+    # Prefer indent first, then JSX normalization if web file, then whitespace/trailing
+    modes = ["indent", "jsx", "whitespace", "trailing"] if is_web else ["indent", "whitespace", "trailing"]
+
+    max_anchor = min(8, max(4, len(want_raw) // 2))
+    anchor_sizes = list(range(4, max_anchor + 1))
+    for fallback_size in [3, 2]:
+        if fallback_size not in anchor_sizes and len(want_raw) >= fallback_size * 2:
+            anchor_sizes.append(fallback_size)
+
+    for mode in modes:
+        for anchor_size in anchor_sizes:
+            head_lines = [ln.strip() for ln in want_raw[:anchor_size] if ln.strip()]
+            tail_lines = [ln.strip() for ln in want_raw[-anchor_size:] if ln.strip()]
+            if not head_lines or not tail_lines:
+                continue
+
+            head_spans = _match_line_spans(doc_lines, head_lines, mode=mode)
+            tail_spans = _match_line_spans(doc_lines, tail_lines, mode=mode)
+
+            if not head_spans or not tail_spans:
+                continue
+
+            # Case 1: Unique head and unique tail
+            if len(head_spans) == 1 and len(tail_spans) == 1:
+                h_start, _, h_sline, _ = head_spans[0]
+                _, t_end, _, t_eline = tail_spans[0]
+                if h_start < t_end:
+                    ui.warn(
+                        f"Large {what} block matched via boundary anchors "
+                        f"({anchor_size}+{anchor_size} lines) at lines {h_sline + 1}-{t_eline + 1} in {target}"
+                    )
+                    _verbose_note(
+                        f"{tier_label} (boundary anchors {anchor_size}+{anchor_size}, mode={mode}): "
+                        f"matched {target} lines {h_sline + 1}-{t_eline + 1}"
+                    )
+                    return MatchResult(
+                        h_start,
+                        t_end,
+                        f" (large block matched via {anchor_size}+{anchor_size} boundary anchors)",
+                        True,
+                        (h_sline, t_eline),
+                    )
+
+            # Case 2: Unique head, multiple tails (e.g. repeated closing tags/brackets)
+            if len(head_spans) == 1 and len(tail_spans) > 1:
+                h_start, _, h_sline, _ = head_spans[0]
+                valid_tails = [ts for ts in tail_spans if ts[0] > h_start]
+                if valid_tails:
+                    best_tail = min(valid_tails, key=lambda ts: abs((ts[3] - h_sline + 1) - len(want_raw)))
+                    diff = abs((best_tail[3] - h_sline + 1) - len(want_raw))
+                    if diff <= max(15, int(len(want_raw) * 0.40)):
+                        _, t_end, _, t_eline = best_tail
+                        ui.warn(
+                            f"Large {what} block matched via boundary anchors "
+                            f"({anchor_size}+{anchor_size} lines) at lines {h_sline + 1}-{t_eline + 1} in {target}"
+                        )
+                        _verbose_note(
+                            f"{tier_label} (boundary anchors {anchor_size}+{anchor_size}, mode={mode}, disambiguated tail): "
+                            f"matched {target} lines {h_sline + 1}-{t_eline + 1}"
+                        )
+                        return MatchResult(
+                            h_start,
+                            t_end,
+                            f" (large block matched via {anchor_size}+{anchor_size} boundary anchors)",
+                            True,
+                            (h_sline, t_eline),
+                        )
+
+            # Case 3: Multiple heads, unique tail
+            if len(head_spans) > 1 and len(tail_spans) == 1:
+                _, t_end, _, t_eline = tail_spans[0]
+                valid_heads = [hs for hs in head_spans if hs[1] < t_end]
+                if valid_heads:
+                    best_head = min(valid_heads, key=lambda hs: abs((t_eline - hs[2] + 1) - len(want_raw)))
+                    diff = abs((t_eline - best_head[2] + 1) - len(want_raw))
+                    if diff <= max(15, int(len(want_raw) * 0.40)):
+                        h_start, _, h_sline, _ = best_head
+                        ui.warn(
+                            f"Large {what} block matched via boundary anchors "
+                            f"({anchor_size}+{anchor_size} lines) at lines {h_sline + 1}-{t_eline + 1} in {target}"
+                        )
+                        _verbose_note(
+                            f"{tier_label} (boundary anchors {anchor_size}+{anchor_size}, mode={mode}, disambiguated head): "
+                            f"matched {target} lines {h_sline + 1}-{t_eline + 1}"
+                        )
+                        return MatchResult(
+                            h_start,
+                            t_end,
+                            f" (large block matched via {anchor_size}+{anchor_size} boundary anchors)",
+                            True,
+                            (h_sline, t_eline),
+                        )
+
+    return None
+
+
 def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchResult:
     """
     Multi-tier intelligent search with strict uniqueness.
@@ -593,7 +774,8 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
     # Guard against oversized search blocks with a warning instead of a hard block
     needle_lines_count = len(needle.split("\n"))
     needle_char_count = len(needle)
-    if needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS:
+    is_oversized = needle_lines_count > MAX_SEARCH_LINES or needle_char_count > MAX_SEARCH_CHARS
+    if is_oversized:
         ui.warn(
             f"Oversized {what} block in {target} ({needle_lines_count} lines, {needle_char_count} chars; "
             f"preferred limit is {MAX_SEARCH_LINES} lines). "
@@ -636,45 +818,11 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
     # For large blocks the LLM wrote a huge SEARCH but only the first/last few lines
     # need to anchor the region. Try 4+4 first, then expand until unique.
     # This fires BEFORE the slow full-text tiers (trailing ws, indent, fuzzy...).
-    if len(want_raw) > BOUNDARY_ANCHOR_THRESHOLD:
+    if len(want_raw) > BOUNDARY_ANCHOR_THRESHOLD or is_oversized:
         _verbose_note(f"Tier 0 (boundary anchors, large block {len(want_raw)} lines): trying {target}")
-        max_anchor = min(8, len(want_raw) // 2)
-        for anchor_size in range(4, max_anchor + 1):
-            head_lines = [ln.strip() for ln in want_raw[:anchor_size] if ln.strip()]
-            tail_lines = [ln.strip() for ln in want_raw[-anchor_size:] if ln.strip()]
-            if not head_lines or not tail_lines:
-                break
-            head_spans = _match_line_spans(doc_lines, head_lines, mode="indent")
-            tail_spans = _match_line_spans(doc_lines, tail_lines, mode="indent")
-            if len(head_spans) == 1 and len(tail_spans) == 1:
-                h_start, _, h_sline, _ = head_spans[0]
-                _, t_end, _, t_eline = tail_spans[0]
-                if h_start < t_end:
-                    ui.warn(
-                        f"Large {what} block matched via boundary anchors "
-                        f"({anchor_size}+{anchor_size} lines) at lines {h_sline + 1}-{t_eline + 1} in {target}"
-                    )
-                    _verbose_note(
-                        f"Tier 0 (boundary anchors {anchor_size}+{anchor_size}): "
-                        f"matched {target} lines {h_sline + 1}-{t_eline + 1}"
-                    )
-                    return MatchResult(
-                        h_start, t_end,
-                        f" (large block matched via {anchor_size}+{anchor_size} boundary anchors)",
-                        True,
-                        (h_sline, t_eline),
-                    )
-            # If head or tail are ambiguous, expand and retry
-            elif len(head_spans) > 1 or len(tail_spans) > 1:
-                _verbose_note(
-                    f"Tier 0 (anchor_size={anchor_size}): ambiguous head/tail, "
-                    f"expanding to {anchor_size + 1}+{anchor_size + 1}"
-                )
-                continue
-            # If neither head nor tail matched at all, stop trying boundary anchors
-            else:
-                _verbose_note(f"Tier 0 (anchor_size={anchor_size}): no head/tail match, falling through")
-                break
+        anchor_match = _match_boundary_anchors(doc_lines, want_raw, target, what, tier_label="Tier 0")
+        if anchor_match is not None:
+            return anchor_match
         _verbose_note(f"Tier 0 (boundary anchors): failed for {target}, falling through to normal tiers")
 
     # ---- Tier 2: Trailing whitespace tolerant ----
@@ -742,6 +890,17 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
         if len(js_spans) > 1:
             raise _format_spans_error(err_prefix, target, js_spans)
         _verbose_note(f"Tier 6b (JS/TS tokens): no match in {target}")
+
+    # ---- Fast Check for Oversized Blocks Before Slow Fuzzy Search ----
+    if is_oversized:
+        anchor_match = _match_boundary_anchors(doc_lines, want_raw, target, what, tier_label="Tier 8")
+        if anchor_match is not None:
+            return anchor_match
+        _verbose_note(f"Oversized block in {target} failed boundary anchors and normalized tiers; skipping slow fuzzy scan.")
+        diagnostic = _find_closest_match(doc, needle)
+        first = next((ln.strip() for ln in needle.split("\n") if ln.strip()), "")
+        preview = first if len(first) <= 60 else first[:57] + "..."
+        raise OpError(f"ERR|{err_prefix}_NOT_FOUND|{target} (first line: {preview!r}){diagnostic}")
 
     # ---- Tier 7: Dual-Threshold Fuzzy Matching ----
     candidates_raw = _find_high_similarity_candidates(
@@ -811,21 +970,11 @@ def _find_unique_impl(doc: str, needle: str, what: str, target: str) -> MatchRes
 
     _verbose_note(f"Tier 7 (fuzzy): no match in {target}")
 
-    # ---- Tier 8: Boundary anchor last-resort (for blocks that slipped past Tier 0) ----
-    # This covers blocks that are just over the threshold but where Tier 0 was not triggered
-    # (e.g. exactly at the boundary) or where Tier 0 failed and the block shrank after stripping.
-    if len(want_raw) > MAX_SEARCH_LINES:
-        head_lines = [ln.strip() for ln in want_raw[:4] if ln.strip()]
-        tail_lines = [ln.strip() for ln in want_raw[-4:] if ln.strip()]
-        head_spans = _match_line_spans(doc_lines, head_lines, mode="indent")
-        tail_spans = _match_line_spans(doc_lines, tail_lines, mode="indent")
-        if len(head_spans) == 1 and len(tail_spans) == 1:
-            h_start, _, h_sline, _ = head_spans[0]
-            _, t_end, _, t_eline = tail_spans[0]
-            if h_start < t_end:
-                ui.warn(f"Oversized {what} block matched using boundary anchors at lines {h_sline + 1}-{t_eline + 1}")
-                _verbose_note(f"Tier 8 (boundary anchors): matched {target} lines {h_sline + 1}-{t_eline + 1}")
-                return MatchResult(h_start, t_end, " (matched oversized block via boundary anchors)", True, (h_sline, t_eline))
+    # ---- Tier 8: Boundary anchor last-resort ----
+    if len(want_raw) > BOUNDARY_ANCHOR_THRESHOLD:
+        anchor_match = _match_boundary_anchors(doc_lines, want_raw, target, what, tier_label="Tier 8")
+        if anchor_match is not None:
+            return anchor_match
         _verbose_note(f"Tier 8 (boundary anchors): no match in {target}")
 
     # ---- Diagnostic failure ----

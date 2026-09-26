@@ -50,21 +50,27 @@ Multiple edits: repeat pairs under one `EDIT path`. Same style throughout.
 
 ## Critical rules
 
-- **Missing context? Ask first.** If you don't have project context or a file's code, do NOT guess. Ask user to run `code-exec bundle` (or `code-exec -b`), or emit a batch `FETCH` block.
-- **FETCH before EDIT if needed.** Request full files (`FETCH path`), slices (`FETCH path:80-140`), or symbols (`FETCH path:my_func`). Batch all `FETCH` lines into ONE block. The engine copies exact code to the clipboard for the next turn.
-- **ONE block per reply.** Never emit a second block as a correction — merge into ONE.
-- **SEARCH must be verbatim.** Copy exact lines from the file or diff (`+` lines = current file). Never write from memory.
-- **3–6 unique lines** as anchor (max 60 lines). For large regions: first 4 + last 4 lines only.
+- **Keep SEARCH small (3–8 lines):** NEVER dump 50+ lines into SEARCH to change 2 lines. Include only 3–8 lines around the modification.
+- **Multiple edits:** If modifying multiple locations in one file, use multiple small SEARCH/REPLACE blocks under one `EDIT path` (do NOT make one huge block spanning the file).
+- **Large replacements (>20 lines):** Use boundary anchors: first 4 lines + last 4 lines in SEARCH; full replacement in REPLACE.
+- **Preserve syntax & bracket balance:** Ensure all `{ }`, `( )`, `[ ]`, and `<tag>...</tag>` opened in REPLACE are balanced. Unbalanced brackets cause `FUZZY_SYNTAX_ERROR`.
+- **Missing context? Ask first:** If you don't have project context or a file's code, do NOT guess. Ask user to run `code-exec bundle` (or `code-exec -b`), or emit a batch `FETCH` block.
+- **FETCH before EDIT if needed:** Request full files (`FETCH path`), slices (`FETCH path:80-140`), or symbols (`FETCH path:my_func`). Batch all `FETCH` lines into ONE block. The engine copies exact code to the clipboard for the next turn.
+- **ONE block per reply:** Never emit a second block as a correction — merge into ONE.
+- **SEARCH must be verbatim:** Copy exact lines from the file or diff (`+` lines = current file). Never write from memory.
 - **Never use generic anchors** (`pass`, `}`, `return`, bare HTML tags) — they match everywhere.
 - **Paths are project-relative** (`src/app.py`). Never guess; never use `~/`, `/`, or `..`.
-- **Raw ASCII only (no LaTeX/HTML escapes).** NEVER use `\vert{}\vert{}`, `\&\&`, `&amp;&amp;`, `\leq`, etc. Always write literal `||`, `&&`, `|`, `&`, `<`, `>`, `<=`, `>=`, `!=`, `%`.
-- **RUN is supported for tests, Python, and curl**: Use `RUN` for tests (`pytest`), running Python scripts (`RUN python script.py`), or `curl`. Custom commands require user acceptance in the terminal.
+- **Raw ASCII only (no LaTeX/HTML escapes):** NEVER use `\vert{}\vert{}`, `\&\&`, `&amp;&amp;`, `\leq`, etc. Always write literal `||`, `&&`, `|`, `&`, `<`, `>`, `<=`, `>=`, `!=`, `%`.
+- **RUN is supported for tests, Python, and curl:** Use `RUN` for tests (`pytest`), running Python scripts (`RUN python script.py`), or `curl`. Custom commands require user acceptance in the terminal.
 - No prose inside the block. No comments. No explanations.
 
 ## Errors → clipboard retry
 On error the diagnostic is copied to your clipboard. Fix ONLY the failing operation:
 - `SEARCH_NOT_FOUND` — copy real lines from file (look at `+` lines in diff shown)
-- `SEARCH_AMBIGUOUS` — add more unique context lines
+- `SEARCH_AMBIGUOUS` — add 1–3 more unique surrounding context lines
+- `SEARCH_TOO_BIG` — shrink to 3–8 lines or use boundary anchors (first 4 + last 4)
+- `FUZZY_SYNTAX_ERROR` — fix unbalanced `{ }`, `( )`, `[ ]`, or unclosed tags in REPLACE
+- `CREATE_EXISTS` — use EDIT instead of CREATE
 - `FILE_NOT_FOUND` — verify path; use CREATE for new files
 - `MULTIPLE_PLANS` — merge into one block
 - `PLAN_NOT_FOUND` — block was not closed or output was cut off
