@@ -426,7 +426,7 @@ class TerminalUI:
             "CREATE": c.GREEN, "TOUCH": c.GREEN, "MKDIR": c.GREEN,
             "APPEND": c.GREEN, "PREPEND": c.GREEN,
             "INSERT_BEFORE": c.GREEN, "INSERT_AFTER": c.GREEN,
-            "EDIT": c.AMBER, "PATCH": c.AMBER, "REPLACE_ALL": c.AMBER,
+            "EDIT": c.AMBER, "EDIT_RANGE": c.AMBER, "PATCH": c.AMBER, "REPLACE_ALL": c.AMBER,
             "DELETE": c.RED,
             "MOVE": c.CYAN, "COPY": c.CYAN, "RENAME": c.CYAN,
             "CHMOD": c.CYAN, "COMMIT": c.CYAN,
@@ -473,8 +473,10 @@ class TerminalUI:
             return f"{args[0]}{range_info}", "", 0, 0
         if cmd == "CREATE":
             add = self._line_count(op.data)
-        elif cmd in {"EDIT", "REPLACE_ALL"}:
+        elif cmd in {"EDIT", "EDIT_RANGE", "REPLACE_ALL"}:
             rem, add = self._line_count(op.data), self._line_count(op.extra)
+            if cmd == "EDIT_RANGE" and len(args) >= 3:
+                target = f"{target} lines {args[1]}-{args[2]} (exact)"
         elif cmd == "PATCH":
             for ln in (op.data or "").splitlines():
                 if ln.startswith("+") and not ln.startswith("+++"):
@@ -569,6 +571,7 @@ class TerminalUI:
         lines.append(self._divider("Plan commands"))
         row("CREATE", "path", c.GREEN, "<<< content >>>", bold=True)
         row("EDIT", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
+        row("EDIT_RANGE", "path start-end", c.AMBER, "EXPECT <<<...>>> REPLACE <<<...>>> (exact lines)", bold=True)
         row("PATCH", "path", c.AMBER, "<<< unified diff >>>", bold=True)
         row("REPLACE_ALL", "path", c.AMBER, "SEARCH <<<...>>> REPLACE <<<...>>>", bold=True)
         row("FETCH", "path[:range]", c.CYAN, "(request file context to clipboard)", bold=True)
@@ -1440,6 +1443,9 @@ class TerminalUI:
         ("SEARCH_TOO_BIG", "SEARCH block is too large (limit is 60 lines / 4000 chars). Use a smaller unique anchor."),
         ("SEARCH_NOT_FOUND", "SEARCH block didn't match. Compare against the diff above and add unique lines."),
         ("SEARCH_AMBIGUOUS", "SEARCH target matches multiple locations. Include more surrounding lines for uniqueness."),
+        ("STALE_RANGE", "EDIT_RANGE no longer matches current file lines. FETCH the latest range and rebuild the edit."),
+        ("STALE_FILE", "File content changed since validation or preview. FETCH current content and rebuild the plan."),
+        ("RECOVERY_SAVE_FAILED", "Recovery information could not be saved. Inspect current files and retained backups before retrying."),
         ("CONFLICTING_OPERATIONS", "The plan performs contradictory operations on the same file. Separate or order your edits."),
         ("FORBIDDEN_COMMAND", "Dangerous or destructive pattern in RUN command. Remove forbidden flags/patterns."),
         ("FILE_PROTECTED", "Target is a sensitive file/key. Modify configuration files manually."),
@@ -1465,13 +1471,16 @@ class TerminalUI:
         lines.append(self._line(f"{c.paint('●', c.SLATE)} {c.paint('Diagnostics prompt copied to clipboard for your AI chat.', c.SLATE)}"))
         self._card("Execution / validation error", "err", lines, wide=True, file=sys.stderr)
 
-    def command_failed(self, error: str, backup_dir: Path | None) -> None:
+    def command_failed(self, error: str, backup_dir: Path | None, *, changes_kept: bool = True, recovery_saved: bool | None = None) -> None:
         c = self.palette
         print(self.panel_bottom(), file=sys.stderr)  # close the "Executing" panel
         lines = [
             self._line(error, c.RED),
-            self._line("Stopped. Earlier changes kept.", c.AMBER),
+            self._line("Stopped. Earlier file changes kept." if changes_kept else "Stopped. No journaled file changes applied.", c.AMBER),
         ]
+        if changes_kept and recovery_saved is not None:
+            message = "Recovery manifest saved. Run code-exec undo to restore file changes." if recovery_saved else "Recovery manifest could not be saved. Inspect current files and backups."
+            lines.append(self._line(message, c.AMBER))
         if backup_dir is not None:
             lines.append(self._kv("Backups", c.paint(str(backup_dir), c.SLATE)))
         self._card("Command failed", "err", lines, file=sys.stderr)

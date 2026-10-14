@@ -46,10 +46,15 @@ Before touching any files on disk, `code-exec` executes several layers of safegu
 1. **Extraction**: Isolates the plan block and ignores chat greetings, explanations, and unrelated code.
 2. **Preflight Simulation**: Simulates the plan in an in-memory virtual filesystem to catch path errors, conflicting writes, and invalid edits before touching disk.
 3. **Diff Preview**: Lets you inspect the exact proposed file differences by pressing `v` (view diff) or `t` (view directory tree) before confirming.
-4. **Automatic Rollback (`undo`)**: Backs up modified files under `.code_exec/backups/`. If an operation fails midway, changes roll back immediately. You can also revert the last run at any time via:
+4. **Recovery (`undo`)**: Saves recovery information under `.code_exec/backups/`, including for plans that only create files. File-operation failures trigger rollback. RUN or verification failures keep earlier file changes and prevent the plan's commit; use the saved recovery information to undo journaled file operations:
    ```bash
    code-exec undo
    ```
+   Commands can have side effects that undo cannot reverse. Failed or partial undo retains backups and records completed steps. If recording progress fails, undo stops for inspection. A recovery-save error means you must inspect current files and retained backup data before assuming undo is available.
+
+Read the **recovery outcome** in the clipboard diagnostic before asking the AI to retry. With no changes or a complete rollback, rebuild the full intended plan. With retained changes, FETCH current files and resume only unfinished work. With incomplete rollback, recover before another executable plan. `STALE_FILE` means content changed since validation or preview: FETCH current content and rebuild the plan.
+
+Direct test/check commands such as `pytest` and `ruff check` run automatically. Installs, npm/pnpm/yarn scripts (including `npm test`), custom commands, and shell syntax require interactive terminal approval. `--yes` skips plan confirmation only; it does not approve these RUN commands.
 
 ---
 
@@ -126,7 +131,7 @@ COMMAND path [<<< content >>>]
 - `FETCH path` or `FETCH path:start-end` or `FETCH path:symbol` : Request full file, line range, or function/class from the repository. Batch all FETCH commands in ONE block.
 - `MOVE src -> dst` / `COPY src -> dst` / `RENAME src -> dst`
 - `MKDIR path` / `TOUCH path` / `CHMOD path +x`
-- `RUN cmd` : Whitelisted test runners and linters (`pytest`, `python3 -m unittest`, `npm test`, `cargo test`, `ruff`, etc.).
+- `RUN cmd` : Direct test/check tools (`pytest`, `python3 -m unittest`, `cargo test`, `ruff check`) run automatically. Installs, npm/pnpm/yarn scripts, custom commands, and shell syntax require interactive terminal approval, even with `--yes`.
 - `COMMIT type(scope): message` : Optional Git commit (must be the final line).
 
 ### EDIT Block Format (Always use verbatim code)
@@ -145,6 +150,7 @@ new replacement lines
 - **Verbatim SEARCH anchors**: Include 3–6 exact, unique lines from the current file so the CLI matches unambiguously. Never use generic lines like `pass`, `return`, or lone brackets.
 - **Project-relative paths**: Use clean relative paths (e.g., `src/app.py`). Never prefix with `/`, `~/`, or `../`.
 - **No prose inside the block**: Keep comments and chat markdown out of the `code_exec` fence.
+- **Recovery-aware retries**: Rebuild the full plan after no changes or complete rollback. If changes were retained, FETCH current content and resume only unfinished work. Recover an incomplete rollback before another executable plan. For STALE_FILE, FETCH and rebuild using current content. Command side effects are not automatically reversed.
 ````
 
 ### How to Save in Your AI Web Interface

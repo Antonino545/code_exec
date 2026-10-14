@@ -36,8 +36,8 @@ py-modules = [
     "code_exec_updater",
     "code_exec_completions",
     "code_exec_watch",
+    "code_exec_execution",
 ]
 
 [tool.setuptools.package-data]
 "*" = ["*.md"]
-

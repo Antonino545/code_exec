@@ -90,7 +90,8 @@ class TestErrorGuidance(unittest.TestCase):
     def test_search_too_big_guidance(self):
         g = self._guidance("ERR|SEARCH_TOO_BIG|foo.py")
         self._assert_has_do_and_dont(g, "SEARCH_TOO_BIG")
-        self.assertIn("boundary", g.lower())
+        self.assertIn("FETCH", g)
+        self.assertIn("EDIT_RANGE", g)
 
     def test_create_exists_guidance(self):
         g = self._guidance("ERR|CREATE_EXISTS|foo.py")
@@ -211,7 +212,8 @@ class TestClipboardRetryPrompt(unittest.TestCase):
         self.assertIn("code_exec` plan failed", prompt)
         self.assertIn("Troubleshooting Guidance", prompt)
         self.assertIn("Instructions for the fix", prompt)
-        self.assertIn("Fix **only** the failing operation", prompt)
+        self.assertIn("Recovery outcome unknown", prompt)
+        self.assertIn("Follow the recovery outcome", prompt)
         self.assertIn("Operation 2", prompt)
         self.assertIn("SEARCH_NOT_FOUND", prompt)
 

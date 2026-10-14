@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -20,8 +21,20 @@ def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict
     if not needs_prompt:
         return command, None
 
-    cmd_lower = command.strip().lower()
-    is_network_cmd = cmd_lower.startswith(("curl ", "curl\t", "wget ", "git clone", "pip install"))
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = []
+    is_network_cmd = bool(words) and (
+        words[0] in {"curl", "wget"}
+        or tuple(words[:2]) in {
+            ("git", "clone"), ("pip", "install"), ("pip3", "install"),
+            ("npm", "install"), ("npm", "ci"),
+            ("pnpm", "install"), ("pnpm", "add"),
+            ("yarn", "install"), ("yarn", "add"),
+        }
+        or tuple(words[:4]) in {("python", "-m", "pip", "install"), ("python3", "-m", "pip", "install")}
+    )
     if is_network_cmd:
         # User explicitly approved a network command in the interactive terminal prompt.
         # Allow network traffic to proceed.
@@ -31,9 +44,9 @@ def build_sandboxed_command(command: str, needs_prompt: bool) -> tuple[str, dict
     actual_cmd = command
 
     if sys.platform.startswith("linux"):
-        actual_cmd = f"unshare -r -n {command}"
+        actual_cmd = f"unshare -r -n -- /bin/sh -c {shlex.quote(command)}"
     elif sys.platform == "darwin":
-        actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' {command}"
+        actual_cmd = f"sandbox-exec -p '(version 1) (allow default) (deny network-outbound)' /bin/sh -c {shlex.quote(command)}"
     elif sys.platform == "win32":
         extra_env = {
             "HTTP_PROXY": "http://127.0.0.1:0",
@@ -60,14 +73,33 @@ def validate_run_command(cmd: str) -> bool:
 
     # Block destructive/dangerous patterns
     for forbidden in FORBIDDEN_RUN_SUBSTRINGS:
-        if forbidden in cmd_lower:
+        if forbidden.lower() in cmd_lower:
             raise OpError(f"ERR|FORBIDDEN_COMMAND|{trimmed} - contains forbidden pattern '{forbidden}'")
 
-    has_chaining = any(op in trimmed for op in SHELL_CHAINING_OPERATORS)
+    # Conservative on purpose: even quoted shell characters require approval.
+    # Check the original input so stripping cannot hide newline commands.
+    if any(op in cmd for op in (*SHELL_CHAINING_OPERATORS, "\x00")):
+        return True
+    if sys.platform == "win32" and any(marker in cmd for marker in ("%", "!", "^")):
+        return True
+    try:
+        words = shlex.split(trimmed)
+    except ValueError:
+        return True
 
-    # Standard whitelisted test runners run automatically (unless chained)
-    if any(cmd_lower.startswith(prefix) for prefix in ALLOWED_RUN_COMMAND_PREFIXES):
-        return True if has_chaining else False
+    # Match complete executable/subcommand tokens, never executable prefixes.
+    automatic = (tuple(prefix.split()) for prefix in ALLOWED_RUN_COMMAND_PREFIXES)
+    if any(tuple(words[:len(prefix)]) == prefix for prefix in automatic):
+        if words[:2] == ["git", "diff"] and any(
+            word == "--ext-diff" or word.startswith("--output") for word in words[2:]
+        ):
+            return True
+        return False
+    options = words[1:words.index("--")] if "--" in words else words[1:]
+    if words and words[0] == "black" and "--check" in options:
+        return False
+    if words[:2] == ["ruff", "format"] and "--check" in options:
+        return False
 
     # Any other command (python script, build tools, npm, custom scripts)
     # is permitted with explicit interactive user confirmation in terminal
