@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -559,13 +560,40 @@ class TestImprovements(unittest.TestCase):
 
 
     def test_send_notification_runs_safely(self):
-        """Verify send_notification executes without raising exceptions."""
+        """Each supported notification backend works without host dependencies."""
         from code_exec_ui import send_notification
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value.returncode = 0
-            res = send_notification("code-exec test", "test message", subtitle="Sub", is_error=False)
-            self.assertTrue(res)
-            mock_run.assert_called_once()
+        for platform, executable in (("darwin", "osascript"), ("linux", "notify-send"), ("win32", "powershell")):
+            with self.subTest(platform=platform), \
+                 patch("code_exec_ui.sys.platform", platform), \
+                 patch("code_exec_ui.shutil.which", return_value="/mock/notify-send"), \
+                 patch("code_exec_ui.play_system_sound"), \
+                 patch("code_exec_ui.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                res = send_notification("code-exec test", "test message", subtitle="Sub", is_error=False)
+                self.assertTrue(res)
+                mock_run.assert_called_once()
+                self.assertEqual(mock_run.call_args.args[0][0], executable)
+
+    def test_send_notification_without_linux_backend_returns_false(self):
+        """Headless Linux does not require a desktop notification utility."""
+        from code_exec_ui import send_notification
+        with patch("code_exec_ui.sys.platform", "linux"), \
+             patch("code_exec_ui.shutil.which", return_value=None), \
+             patch("code_exec_ui.play_system_sound"), \
+             patch("code_exec_ui.subprocess.run") as mock_run:
+            self.assertFalse(send_notification("code-exec test", "test message"))
+            mock_run.assert_not_called()
+
+    def test_send_notification_launch_errors_return_false(self):
+        """Missing executables and timeouts must not break the caller."""
+        from code_exec_ui import send_notification
+        for error in (FileNotFoundError("tool missing"), subprocess.TimeoutExpired("notification", 3)):
+            with self.subTest(error=error), \
+                 patch("code_exec_ui.sys.platform", "linux"), \
+                 patch("code_exec_ui.shutil.which", return_value="/mock/notify-send"), \
+                 patch("code_exec_ui.play_system_sound"), \
+                 patch("code_exec_ui.subprocess.run", side_effect=error):
+                self.assertFalse(send_notification("code-exec test", "test message"))
 
     def test_ui_menu_option_w_launches_watch(self):
         """Verify that selecting 'w' from the interactive menu launches watch mode."""
