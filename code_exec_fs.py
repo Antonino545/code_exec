@@ -346,6 +346,8 @@ class RealFS:
         ui.command(command)
 
         if needs_prompt:
+            if not sys.stdin.isatty():
+                raise CommandFailed(f"Execution denied: interactive terminal approval required for: {command}")
             c = ui.palette
             print(c.paint("\n  ⚠️  SECURITY WARNING: Custom Execution Requested", c.AMBER, bold=True))
             try:
@@ -378,6 +380,8 @@ class RealFS:
             raise CommandFailed(
                 f"Command timed out after {self.timeout}s: {actual_cmd}"
             ) from None
+        except OSError as exc:
+            raise CommandFailed(f"Cannot execute command: {actual_cmd}: {exc}") from None
 
         stdout_text = getattr(result, "stdout", "")
         if isinstance(stdout_text, str) and stdout_text:
@@ -406,37 +410,25 @@ class RealFS:
 
     def rollback(self) -> list[str]:
         errors = []
-        for entry in reversed(self.journal):
+        while self.journal:
+            entry = self.journal[-1]
             kind, path = entry[0], entry[1]
             try:
-                if kind == "rmdir":
-                    try:
-                        path.rmdir()
-                    except OSError:
-                        pass
-                elif kind == "remove":
-                    _remove(path)
-                elif kind == "restore":
-                    _remove(path)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(entry[2]), str(path))
-                elif kind == "move_back":
-                    entry[2].parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(entry[2]))
-                elif kind == "chmod":
-                    try:
-                        os.chmod(path, entry[2])
-                    except OSError:
-                        pass
+                _restore_entry(kind, path, entry[2] if len(entry) > 2 else None)
+                self.journal.pop()
             except Exception as exc:
                 errors.append(f"{kind} {rel(path)}: {exc}")
-        self.journal.clear()
+                # Earlier entries can depend on this restoration. Preserve
+                # them and their backup slots for recovery in the same order.
+                break
         return errors
 
-    def save_backup_manifest(self) -> None:
+    def save_backup_manifest(self, *, recovery_required: bool = False) -> None:
         """Persists rollback manifest to disk to allow subsequent `undo` commands."""
-        if self.backup_dir is None or not self.journal:
+        if not self.journal:
             return
+        if self.backup_dir is None:
+            self._slot()  # CREATE-only plans still need an undo manifest.
         manifest_entries = []
         for entry in self.journal:
             item = {"kind": entry[0], "path": rel(entry[1])}
@@ -454,13 +446,24 @@ class RealFS:
             "timestamp": datetime.now().isoformat(),
             "journal": manifest_entries,
             "ran_commands": self.ran_commands,
+            "recovery_required": recovery_required,
         }
         manifest_file = self.backup_dir / "manifest.json"
-        manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+        atomic_write(manifest_file, json.dumps(manifest_data, indent=2))
 
         # Prune older backups beyond MAX_BACKUP_HISTORY
         try:
-            backups = sorted([d for d in BACKUP_ROOT.iterdir() if d.is_dir()], key=lambda d: d.name)
+            backups = []
+            for directory in BACKUP_ROOT.iterdir():
+                if not directory.is_dir():
+                    continue
+                try:
+                    previous = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue  # Unreadable recovery data must not be pruned.
+                if isinstance(previous, dict) and not previous.get("undo_started") and not previous.get("recovery_required"):
+                    backups.append(directory)
+            backups.sort(key=lambda d: d.name)
             while len(backups) > MAX_BACKUP_HISTORY:
                 oldest = backups.pop(0)
                 shutil.rmtree(oldest, ignore_errors=True)
@@ -473,8 +476,37 @@ class RealFS:
             self.backup_dir = None
 
 
+def _restore_entry(kind: str, path: Path, slot=None) -> None:
+    """Restore one journal entry, retaining snapshots until recovery succeeds."""
+    if kind == "rmdir":
+        if os.path.lexists(path):
+            path.rmdir()
+    elif kind == "remove":
+        _remove(path)
+    elif kind == "restore":
+        if slot is None or not os.path.lexists(slot):
+            raise OpError(f"Required backup content missing for {rel(path)}")
+        _remove(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if slot.is_dir() and not slot.is_symlink():
+            shutil.copytree(slot, path, symlinks=True)
+        else:
+            shutil.copy2(slot, path, follow_symlinks=False)
+    elif kind == "move_back":
+        if slot is None or not os.path.lexists(path):
+            raise OpError(f"Required moved path missing: {rel(path)}")
+        if os.path.lexists(slot):
+            raise OpError(f"Cannot restore move over existing path: {rel(slot)}")
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(slot))
+    elif kind == "chmod":
+        os.chmod(path, int(slot))
+    else:
+        raise OpError(f"Unknown backup operation: {kind}")
+
+
 def undo_last_run() -> tuple[bool, str]:
-    """Reverts file changes made by the most recent successful plan."""
+    """Revert the newest saved plan, safely resuming a partial undo."""
     if not BACKUP_ROOT.exists():
         return False, "No backups found (.code_exec/backups does not exist)."
     backups = sorted(
@@ -491,52 +523,46 @@ def undo_last_run() -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Failed to read backup manifest: {exc}"
 
+    if not isinstance(data, dict):
+        return False, f"Invalid backup manifest; backup retained at {target_backup}"
     journal = data.get("journal", [])
-    errors = []
+    if not isinstance(journal, list) or any(not isinstance(item, dict) for item in journal):
+        return False, f"Invalid backup journal; backup retained at {target_backup}"
     restored_count = 0
     for item in reversed(journal):
+        if item.get("done"):
+            continue
+        if item.get("in_progress"):
+            return False, f"Previous undo progress could not be saved safely; inspect recovery data at {target_backup} before retrying."
         kind = item.get("kind")
         rel_path = item.get("path")
         slot = item.get("slot")
-        if not rel_path:
-            continue
-        path = ROOT / rel_path
         try:
-            if kind == "rmdir":
-                if path.exists() and path.is_dir():
-                    try:
-                        path.rmdir()
-                    except OSError:
-                        pass
-            elif kind == "remove":
-                _remove(path)
-                restored_count += 1
-            elif kind == "restore" and slot:
-                slot_path = target_backup / slot
-                if slot_path.exists():
-                    _remove(path)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    if slot_path.is_dir():
-                        shutil.copytree(slot_path, path, symlinks=True)
-                    else:
-                        shutil.copy2(slot_path, path)
-                    restored_count += 1
-            elif kind == "move_back" and slot:
-                src_path = ROOT / slot
-                if path.exists():
-                    src_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(src_path))
-                    restored_count += 1
-            elif kind == "chmod" and slot:
-                try:
-                    os.chmod(path, int(slot))
-                    restored_count += 1
-                except (ValueError, OSError):
-                    pass
+            path = safe_path(rel_path, follow_leaf=False)
+            resolved_slot = slot
+            if kind == "restore":
+                resolved_slot = target_backup / slot if slot else None
+                if resolved_slot is not None:
+                    # Do not follow the leaf: backed-up symlinks are restored
+                    # as symlinks, but their slot must stay in this backup.
+                    (resolved_slot.parent.resolve() / resolved_slot.name).relative_to(target_backup.resolve())
+            elif kind == "move_back":
+                resolved_slot = safe_path(slot, follow_leaf=False)
+            data["undo_started"] = True
+            item["in_progress"] = True
+            atomic_write(manifest_file, json.dumps(data, indent=2))
+            try:
+                _restore_entry(kind, path, resolved_slot)
+            except Exception:
+                item.pop("in_progress", None)
+                atomic_write(manifest_file, json.dumps(data, indent=2))
+                raise
+            item.pop("in_progress", None)
+            item["done"] = True
+            atomic_write(manifest_file, json.dumps(data, indent=2))
+            restored_count += 1
         except Exception as exc:
-            errors.append(f"Failed to undo {kind} on {rel_path}: {exc}")
+            return False, f"Failed to undo {kind} on {rel_path}: {exc}\nBackup retained at {target_backup}."
 
     shutil.rmtree(target_backup, ignore_errors=True)
-    if errors:
-        return False, "\n".join(errors)
     return True, f"Successfully reverted {restored_count} change(s) from backup {target_backup.name}."

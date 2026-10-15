@@ -31,26 +31,16 @@ PROTECTED_SUFFIXES = {
 
 DEFAULT_RUN_TIMEOUT = 600  # seconds per RUN command; 0 disables the limit
 
-# Allowed executables and tools for RUN commands
+# Automatic RUN command token prefixes. Validation compares complete tokens.
 ALLOWED_RUN_COMMAND_PREFIXES = (
     "python3 -m unittest",
     "python3 -m pytest",
     "pytest",
     "unittest",
-    "npm test",
-    "npm run ",
-    "npm install",
-    "pnpm test",
-    "pnpm run ",
-    "yarn test",
-    "yarn run ",
     "cargo test",
     "cargo check",
-    "cargo build",
     "go test",
-    "go build",
-    "ruff ",
-    "black ",
+    "ruff check",
     "flake8",
     "mypy",
     "git status",
@@ -84,12 +74,12 @@ FORBIDDEN_RUN_SUBSTRINGS = (
 )
 
 # Shell chaining / redirection operators that invalidate automatic execution approval
-SHELL_CHAINING_OPERATORS = (";", "&&", "||", "|", "&", "`", "$(", "${")
+SHELL_CHAINING_OPERATORS = (";", "&&", "||", "|", "&", "`", "$", "\n", "\r", "<", ">", "(", ")")
 
 COMMANDS = {
     "CREATE", "EDIT", "DELETE", "MOVE", "COPY", "RENAME", "MKDIR",
     "INSERT_BEFORE", "INSERT_AFTER", "APPEND", "PREPEND", "RUN",
-    "COMMIT", "REPLACE_ALL", "CHMOD", "TOUCH", "PATCH", "FETCH",
+    "COMMIT", "REPLACE_ALL", "CHMOD", "TOUCH", "PATCH", "FETCH", "EDIT_RANGE",
 }
 
 
@@ -132,6 +122,7 @@ class MatchResult:
     line_range: tuple[int, int] | None = None
     similarity: float = 1.0
     candidates: list[FuzzyCandidate] = field(default_factory=list)
+    source_fingerprint: str | None = None
 
 
 @dataclass

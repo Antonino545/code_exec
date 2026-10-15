@@ -17,9 +17,10 @@ A deterministic, atomic local code executor and guardrailed runtime designed for
 
 ## Key Highlights
 - **Full AI Response Extraction**: Copy the *entire* conversational response. `code-exec` extracts the executable ````code_exec```` block and automatically ignores conversational prose, markdown headers, and unrelated code snippets.
-- **Sandboxed Execution & Guardrails**: Whitelists safe verification runners (`pytest`, `unittest`, `npm test`, `cargo test`, `ruff`). Demands interactive confirmation for unvetted scripts or chained shell commands (`&&`, `;`, `|`), isolating unvetted runs with network restrictions (`sandbox-exec` on macOS, `unshare` on Linux).
+- **Execution Approval & Guardrails**: Matches direct test/check commands exactly (`pytest`, `python3 -m unittest`, `cargo test`, `ruff check`). Package installs, npm/pnpm/yarn scripts, custom commands, and shell syntax require interactive terminal approval, even with `--yes`. Approved custom commands use OS network restrictions where supported; explicitly approved network commands are exempt.
 - **Persistent Rollback (`undo`)**: Retains project-local transaction journals and file snapshots under `.code_exec/backups/`, enabling full rollback via `code-exec undo`.
 - **Pre-Execution Diff Preview**: Inspect formatted unified diffs before confirming with `--diff` or by pressing `v` at the confirmation prompt.
+- **Stale Preview Protection**: Cached edit and insertion positions are reused only for the exact content that was validated. Changed content stops the plan with `STALE_FILE`; fetch current content and rebuild the plan.
 - **Sensitive Credential Protection**: Blocks accidental modification or deletion of secrets, environment files, and CI workflows (`.env*`, `*.pem`, `*.key`, `id_rsa`, `.github/workflows/*`).
 - **Atomic Consistency Checks & Identity Protection**: Catches conflicting or duplicate file modifications, self-nesting moves, and same-path operations before touching disk.
 - **Interactive TUI & Visual Indicators**: Claude Code-inspired typography, responsive boxed menus, folder tree visualizer, colorized diff previewer, and live animated searching indicators during pattern matching.
@@ -159,6 +160,7 @@ The AI can analyze and explain its reasoning in plain text outside the code bloc
 | :--- | :--- | :--- |
 | `CREATE` | `CREATE path <<< content >>>` | Creates a new file. Fails if the file already exists. |
 | `EDIT` | `EDIT path SEARCH <<<...>>> REPLACE <<<...>>>` | Surgically replaces a unique code anchor. |
+| `EDIT_RANGE` | `EDIT_RANGE path start-end EXPECT <<<...>>> REPLACE <<<...>>>` | Replaces exact inclusive lines only when current text still matches; rejects stale ranges. |
 | `PATCH` | `PATCH path <<< unified diff >>>` | Applies unified diff with line-drift tolerance. |
 | `DELETE` | `DELETE path` | Removes a file or directory safely. |
 | `MOVE` | `MOVE src -> dst` | Moves a file or directory. Supports glob (`test*`) and regex (`regex:...`). |
@@ -199,18 +201,24 @@ The search and replace engine (`code_exec_matcher.py`) executes through an 8-tie
 `code-exec` incorporates multi-layered execution safeguards:
 
 1. **Command Whitelisting**:
-   - Verification tools (`python3 -m unittest`, `pytest`, `npm test`, `cargo test`, `ruff`, `black`, `git status`, etc.) execute cleanly.
-   - Generic or unvetted scripts (`python script.py`, `node app.js`, `bash`) require explicit interactive confirmation (`[y/N]`).
+   - Direct test/check commands (`python3 -m unittest`, `pytest`, `cargo test`, `ruff check`, `black --check`, `git status`, etc.) run automatically. Test tools execute project code; automatic approval is not a guarantee that the code is safe.
+   - Package installations, npm/pnpm/yarn scripts (including `npm test`), custom commands, malformed quoting, and shell syntax require interactive terminal confirmation (`[y/N]`). `--yes` does not bypass it; noninteractive execution is denied for these commands.
    - Destructive patterns (`rm -rf`, `sudo`, `curl | sh`, `wget`) are strictly blocked.
 
 2. **Network Sandboxing**:
-   - Unvetted script runs are wrapped inside OS sandboxes to drop outbound network access (`sandbox-exec -p '(version 1) (allow default) (deny network-outbound)'` on macOS, and `unshare -r -n` on Linux).
+   - Approved custom runs execute the whole shell expression inside the network-restricted wrapper on macOS (`sandbox-exec`) and Linux (`unshare -r -n`). Approved network commands, including package installations and curl, are exempt. Windows proxy settings are best-effort restrictions, not an OS network sandbox.
 
 3. **Protected Paths**:
    - Plans are forbidden from touching `.git`, the project root, environment files (`.env*`), private keys (`*.key`, `*.pem`, `id_rsa`), and CI workflows (`.github/workflows/*`).
 
 4. **Multi-File Consistency Verification**:
    - `preflight()` statically inspects plans for conflicting sequences (e.g. duplicate creations or editing after deletion) before any changes touch your disk.
+
+5. **Failure Recovery**:
+   - File-operation errors trigger rollback. RUN or verification failure retains earlier changes and prevents the plan's commit. Failed RUNs save recovery manifests, including for CREATE-only plans.
+   - `code-exec undo` restores journaled file operations, not command side effects. Partial undo retains backups and records completed steps so a retry does not repeat them. If progress could not be recorded safely, undo stops for manual inspection.
+   - Clipboard diagnostics state whether no changes were applied, rollback completed, changes remain, or rollback was incomplete. Rebuild the full intended plan after complete rollback; fetch current content and resume unfinished work when changes remain. Recover an incomplete rollback before another executable plan.
+   - If recovery information cannot be saved, the tool returns failure, retains available backup data, and reports that undo availability is unconfirmed.
 
 ---
 

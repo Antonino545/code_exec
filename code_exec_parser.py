@@ -114,7 +114,7 @@ _DIFF_CLOSE = re.compile(r"^>{2,}\s*(?:REPLACE|UPDATED|NEW|CONTENT)?\s*:?\s*$", 
 _ARROW = re.compile(r"^(.+?)\s*(?:-+>|=+>|→|➜)\s*(.+)$")
 
 _PAIR_COMMANDS = {"EDIT", "REPLACE_ALL", "INSERT_BEFORE", "INSERT_AFTER"}
-_BLOCK_KEYWORDS = {"SEARCH", "REPLACE", "MARKER", "CONTENT", "END_OF_FILE"}
+_BLOCK_KEYWORDS = {"SEARCH", "EXPECT", "REPLACE", "MARKER", "CONTENT", "END_OF_FILE"}
 _SHELL_WORDS = {
     "npm", "npx", "pnpm", "yarn", "pytest", "python", "python3", "pip", "pip3", "uv", "cargo", "go",
     "ruff", "black", "git", "node", "make", "bash", "sh", "cd", "ls", "cat", "echo",
@@ -1057,6 +1057,20 @@ def _parse_instruction(lines: list[str], i: int) -> tuple[Operation, int]:
         if len(parts) != 2:
             raise ValueError("CHMOD requires 'path mode' (e.g. CHMOD run.sh +x or 755)")
         return Operation("CHMOD", (_path(parts[0], for_existing=True), parts[1].strip())), i
+    if command == "EDIT_RANGE":
+        parts = rest.rsplit(None, 1)
+        if len(parts) != 2 or not re.fullmatch(r"\d+-\d+", parts[1]):
+            raise ValueError("EDIT_RANGE requires 'path start-end' (inclusive, 1-based line numbers)")
+        start_s, end_s = parts[1].split("-", 1)
+        start, end = int(start_s), int(end_s)
+        if start < 1 or end < start:
+            raise ValueError("EDIT_RANGE line range must be positive and start <= end")
+        path = _path(parts[0], for_existing=True)
+        i, expected_inline = expect_keyword(lines, i, "EXPECT", command)
+        expected, i = read_block(lines, i, inline_started=expected_inline)
+        i, replacement_inline = expect_keyword(lines, i, "REPLACE", command)
+        replacement, i = read_block(lines, i, inline_started=replacement_inline)
+        return Operation(command, (path, str(start), str(end)), expected, replacement), i
     if command == "FETCH":
         # Supports:
         #   FETCH path

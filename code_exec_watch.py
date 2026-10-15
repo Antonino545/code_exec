@@ -149,9 +149,17 @@ def watch_clipboard(
 
         ui.show_plan(operations, reason, deferred)
         try:
-            diff_text = generate_diff_fn(operations, _match_cache=match_cache)
-        except TypeError:
-            diff_text = generate_diff_fn(operations)
+            try:
+                diff_text = generate_diff_fn(operations, _match_cache=match_cache)
+            except TypeError:
+                diff_text = generate_diff_fn(operations)
+        except OpError as exc:
+            from code_exec_execution import copy_error_to_clipboard
+            copy_error_to_clipboard(str(exc), recovery_state="no_changes")
+            ui.warn(f"Preview failed: {exc}. No files were modified.")
+            if getattr(args, "notify", True) and hasattr(ui, "watch_validation_error"):
+                ui.watch_validation_error(str(exc))
+            continue
 
         if getattr(args, "diff", False):
             ui.show_diff(diff_text)
@@ -215,7 +223,7 @@ def watch_clipboard(
                         print(ui.palette.paint("\n  ✓ Resuming watch... Copy another AI reply to apply.\n", ui.palette.SLATE))
                 else:
                     if getattr(args, "notify", True) and hasattr(ui, "watch_plan_error"):
-                        ui.watch_plan_error("Plan application failed. Changes rolled back; diagnostic on clipboard.")
+                        ui.watch_plan_error("Plan application or verification failed. See clipboard diagnostic for the recovery outcome.")
                 break
             elif choice in {"n", "no", "skip"}:
                 print(ui.palette.paint("\n  Skipped plan. Resuming watch...\n", ui.palette.SLATE))
