@@ -696,7 +696,8 @@ def generate_skeleton(file_path: Path, max_lines: int = 40) -> str:
                 
                 m_exp = export_named_pattern.match(ln)
                 if m_exp:
-                    out_lines.append(f"export {{ {re.sub(r'[ \t\n]+', ' ', m_exp.group(1)).strip()} }} (line {idx})")
+                    exported_names = re.sub(r"[ \t\n]+", " ", m_exp.group(1)).strip()
+                    out_lines.append(f"export {{ {exported_names} }} (line {idx})")
                     curr_doc.clear()
                     continue
 
